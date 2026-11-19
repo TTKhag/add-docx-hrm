@@ -22,6 +22,7 @@ export const DECISION_TYPES = [
   'Quyết định cử đi học',
   'Quyết định cử đi công tác',
   'Quyết định thôi việc',
+  'Quyết định nghỉ hưu',
   'Quyết định thử việc',
   'Quyết định giao nhiệm vụ',
 ];

@@ -27,13 +27,18 @@ export const projectInputSchema = z.object({
   username: z.string().trim().min(1, 'Nhập tài khoản').max(100, 'Tối đa 100 ký tự'),
   hrmVersion: z.string().trim().min(1, 'Chọn phiên bản EasyHRM'),
   note: z.string().trim().max(500, 'Tối đa 500 ký tự'),
+  // v2: optional contract signer defaults (FR-14)
+  companySignerName: z.string().trim().max(120, 'Tối đa 120 ký tự').default(''),
+  signMethod: z.string().trim().max(120, 'Tối đa 120 ký tự').default(''),
+  digitalSignMethod: z.string().trim().max(120, 'Tối đa 120 ký tự').default(''),
+  otpMethod: z.string().trim().max(120, 'Tối đa 120 ký tự').default(''),
 });
 
-export type ProjectInput = z.infer<typeof projectInputSchema>;
+export type ProjectInput = z.input<typeof projectInputSchema>;
 
 export type FieldErrors = Partial<Record<keyof ProjectInput, string>>;
 
-export function validateProjectInput(input: ProjectInput): { ok: true; value: ProjectInput } | { ok: false; errors: FieldErrors } {
+export function validateProjectInput(input: ProjectInput): { ok: true; value: z.output<typeof projectInputSchema> } | { ok: false; errors: FieldErrors } {
   const r = projectInputSchema.safeParse(input);
   if (r.success) return { ok: true, value: { ...r.data, url: normalizeProjectUrl(r.data.url)! } };
   const errors: FieldErrors = {};

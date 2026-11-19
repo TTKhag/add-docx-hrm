@@ -1,7 +1,21 @@
 import type { CatalogField, GapGroup, MappingRow, SessionStatus } from '@/db/types';
 import type { Candidate } from './detect';
 import { suggestByCue, suggestForExistingKey } from './suggest';
-import { isValidTenKey, toTenKey, uniqueKey } from './tenKey';
+import { isValidTenKey, normalizeExistingKey, toTenKey, uniqueKey } from './tenKey';
+import { normalize } from '@/shared/utils/text';
+
+const LEGAL_BASIS_SKIP_HINTS = new Set(['date', 'date_words', 'date_blank', 'doc_number', 'money']);
+
+/**
+ * BR-13: dates/numbers inside "Căn cứ Luật/Nghị định/Quyết định số … ngày …" are fixed legal references.
+ * Exception: per-case bases (đơn, đề nghị, tờ trình, biên bản, hợp đồng) stay parameters.
+ */
+export function suggestSkip(paragraph: string, hint: string): string | undefined {
+  const n = normalize(paragraph).trim();
+  if (!n.startsWith('can cu') || !LEGAL_BASIS_SKIP_HINTS.has(hint)) return undefined;
+  if (/\b(don|de nghi|to trinh|bien ban|hop dong|ket qua|nguyen vong)\b/.test(n)) return undefined;
+  return 'Quy tắc: căn cứ pháp lý cố định — đề xuất Bỏ';
+}
 
 export const EXTRA_PREFIX = 'extra:';
 
@@ -26,7 +40,19 @@ export function buildRows(
       ruleHint: c.ruleHint,
       status: 'cho',
     };
-    const before = paragraphText(c.location.part, c.location.paragraph).slice(0, c.location.start);
+    const para = paragraphText(c.location.part, c.location.paragraph);
+    const before = para.slice(0, c.location.start);
+    if (c.ruleHint === 'existing_key') {
+      const inner = c.text.replace(/^\{\{|\}\}$/g, '').trim();
+      row.fixedKey = isValidTenKey(inner) ? inner : normalizeExistingKey(inner);
+    }
+    const skip = suggestSkip(para, c.ruleHint);
+    if (skip) {
+      row.proposedSkip = true;
+      row.reason = skip;
+      row.source = 'quy_tac';
+      return row;
+    }
     const s = c.ruleHint === 'existing_key' ? suggestForExistingKey(c.text, fields) : suggestByCue(before, fields);
     if (s) {
       row.fieldCode = s.fieldCode;
@@ -70,6 +96,13 @@ export function assignKeys(
 ): MappingRow[] {
   const keyOf = new Map<string, string>(); // meaningId → key
   const taken = new Set<string>();
+  // Keys already written in the file (fixedKey) are never renamed.
+  for (const r of rows) {
+    if (r.status !== 'duyet' || !r.fixedKey) continue;
+    taken.add(r.fixedKey);
+    const id = meaningId(r, fields);
+    if (id && !keyOf.has(id)) keyOf.set(id, r.fixedKey); // other rows with the same meaning reuse the file's key
+  }
   // First pass: reserve dictionary keys for fields present in this session.
   for (const r of rows) {
     const id = meaningId(r, fields);
@@ -90,6 +123,7 @@ export function assignKeys(
     taken.add(k);
   }
   return rows.map((r) => {
+    if (r.status === 'duyet' && r.fixedKey) return { ...r, key: r.fixedKey };
     const id = meaningId(r, fields);
     const key = r.status === 'duyet' && id ? keyOf.get(id) : undefined;
     return { ...r, key };
@@ -134,9 +168,9 @@ export const GAP_LABEL: Record<GapGroup, string> = {
 };
 
 const GAP_SUGGESTION: Record<GapGroup, string> = {
-  T1: 'Tạm nhập tay; đề nghị đội sản phẩm bổ sung trường.',
-  T2: 'Tạo "Trường giá trị bổ sung" trên EasyHRM (cần người dùng đồng ý).',
-  T3: 'Chưa có trường — chuyển đội sản phẩm như đề xuất tính năng.',
+  T1: 'Claude tạo "Trường giá trị bổ sung" (nhập khi lập văn bản); nên đề nghị đội sản phẩm bổ sung trường.',
+  T2: 'Claude tạo "Trường giá trị bổ sung" trên EasyHRM và ghép.',
+  T3: 'Claude tạo "Trường giá trị bổ sung" (nhập tay giá trị đã tính); đề xuất tính năng tự tính.',
   T4: 'Giữ nguyên văn bản, hỏi người dùng.',
 };
 

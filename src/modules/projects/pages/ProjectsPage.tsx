@@ -8,7 +8,7 @@ import { useCurrentProjectId, useProjects } from '../hooks';
 import { countSessions, deleteProject, projectsToJson, saveProject, setCurrentProject } from '../services/projects.workflow';
 import type { FieldErrors, ProjectInput } from '../services/validate';
 
-const EMPTY: ProjectInput = { name: '', url: '', mst: '', username: '', hrmVersion: HRM_VERSIONS[0], note: '' };
+const EMPTY: ProjectInput = { name: '', url: '', mst: '', username: '', hrmVersion: HRM_VERSIONS[0], note: '', companySignerName: '', signMethod: '', digitalSignMethod: '', otpMethod: '' };
 
 export default function ProjectsPage() {
   const projects = useProjects();
@@ -21,7 +21,11 @@ export default function ProjectsPage() {
   const open = (p?: Project) => {
     setErrors({});
     setEditing(p
-      ? { id: p.id, input: { name: p.name, url: p.url, mst: p.mst ?? '', username: p.username, hrmVersion: p.hrmVersion, note: p.note ?? '' } }
+      ? { id: p.id, input: {
+        name: p.name, url: p.url, mst: p.mst ?? '', username: p.username, hrmVersion: p.hrmVersion, note: p.note ?? '',
+        companySignerName: p.signerDefaults?.companySignerName ?? '', signMethod: p.signerDefaults?.signMethod ?? '',
+        digitalSignMethod: p.signerDefaults?.digitalSignMethod ?? '', otpMethod: p.signerDefaults?.otpMethod ?? '',
+      } }
       : { input: { ...EMPTY } });
   };
 
@@ -55,7 +59,7 @@ export default function ProjectsPage() {
       />
 
       <div className="panel mb-6">
-        <b>Mật khẩu không lưu ở đây.</b> Claude không gõ mật khẩu vào form đăng nhập. Lần đầu, bấm <b>Mở EasyHRM</b>, đăng nhập tay và cho trình duyệt lưu mật khẩu; các lần sau Claude điền MST + tài khoản, trình duyệt tự điền mật khẩu, bạn chỉ bấm Đăng nhập.
+        <b>Đăng nhập tự động bằng phiên đã lưu — Studio không lưu mật khẩu.</b> Claude không được gõ mật khẩu (giới hạn an toàn cố định của Claude). Cách làm: <b>đăng nhập một lần</b> EasyHRM trong trình duyệt mà Claude dùng (trình duyệt của Claude desktop / Claude in Chrome). Phiên đăng nhập được giữ lại, các lần sau Claude thấy đã vào trang chủ thì làm luôn, không hỏi. Chỉ khi EasyHRM hết phiên, Claude điền sẵn MST + tài khoản và nhờ bạn bấm Đăng nhập (trình duyệt tự điền mật khẩu đã lưu).
       </div>
 
       <Section title="Danh sách dự án">
@@ -115,6 +119,21 @@ export default function ProjectsPage() {
                 {HRM_VERSIONS.map((v) => <option key={v} value={v}>{v}</option>)}
               </select>
             </Field>
+            <div className="label mb-2 mt-2">Người ký hợp đồng mặc định (tuỳ chọn)</div>
+            <div className="grid gap-x-4 sm:grid-cols-2">
+              <Field label="Người ký phía công ty" error={errors.companySignerName} hint="Đúng tên trong Thiết lập người đại diện ký. Dùng khi văn bản không ghi tên." htmlFor="pj-signer">
+                <input id="pj-signer" className="input" value={editing.input.companySignerName} onChange={set('companySignerName')} />
+              </Field>
+              <Field label="Hình thức ký" error={errors.signMethod} hint="Để trống: giữ mặc định EasyHRM" htmlFor="pj-sm">
+                <input id="pj-sm" className="input" value={editing.input.signMethod} onChange={set('signMethod')} />
+              </Field>
+              <Field label="Hình thức ký số" error={errors.digitalSignMethod} htmlFor="pj-dsm">
+                <input id="pj-dsm" className="input" value={editing.input.digitalSignMethod} onChange={set('digitalSignMethod')} placeholder="OTP" />
+              </Field>
+              <Field label="Hình thức nhận OTP" error={errors.otpMethod} htmlFor="pj-otp">
+                <input id="pj-otp" className="input" value={editing.input.otpMethod} onChange={set('otpMethod')} placeholder="Email" />
+              </Field>
+            </div>
             <Field label="Ghi chú" error={errors.note} htmlFor="pj-note">
               <textarea id="pj-note" className="input" rows={2} value={editing.input.note} onChange={set('note')} />
             </Field>

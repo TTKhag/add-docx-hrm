@@ -44,7 +44,7 @@ export default function SkillPage() {
             <a className="btn" href={zipUrl} download={zipName} data-testid="skill-download">Tải {zipName}</a>
           </Step>
           <Step n={2} title="Tải lên Claude">Trên Claude: <b>Customize › Skills</b> → bấm <b>+</b> → <b>Create skill</b> → <b>Upload a skill</b> → chọn tệp ZIP vừa tải. Nếu không thấy mục Skills, bật tính năng chạy code trong Settings › Capabilities.</Step>
-          <Step n={3} title="Cho phép trình duyệt">Trong Claude in Chrome (hoặc trình duyệt của Claude desktop), chỉ cho phép hai nơi: domain của Studio này và Link dự án EasyHRM.</Step>
+          <Step n={3} title="Cho phép trình duyệt và đăng nhập một lần">Dùng <b>một</b> trình duyệt cho Claude (trình duyệt của Claude desktop, hoặc Claude in Chrome). Cho phép hai nơi: domain của Studio này và Link dự án EasyHRM. Mở EasyHRM trong trình duyệt đó và <b>đăng nhập một lần</b>: Claude dùng lại phiên này, không cần mật khẩu.</Step>
           <Step n={4} title="Kiểm tra kết nối">
             <div className="mb-2">Chép câu lệnh và dán vào Claude. Claude mở trang này và báo phiên bản skill.</div>
             <code className="mb-2 block border-2 border-black bg-soft p-2 text-xs">{checkPrompt}</code>
@@ -55,7 +55,7 @@ export default function SkillPage() {
 
       <Section title="Điều skill cấm Claude làm">
         <div className="panel text-[13px]">
-          <b>Không gõ mật khẩu</b> · <b>không tự duyệt</b> bảng ghép · <b>không sang EasyHRM</b> khi phiên chưa duyệt · <b>hỏi trước khi bấm Lưu</b> · <b>không Xóa / Đổi trạng thái / Đổi tên</b> mẫu có sẵn · <b>không bật Hiệu lực</b> · dừng khi tên đơn vị trên EasyHRM khác hồ sơ dự án.
+          <b>Không gõ mật khẩu</b> · <b>không tự duyệt</b> bảng ghép · <b>không sang EasyHRM</b> khi phiên chưa duyệt · <b>chỉ bấm Lưu khi câu lệnh bạn dán đã đồng ý</b> (câu lệnh "Giao Claude tạo trên EasyHRM" có sẵn câu đồng ý) · <b>không Xóa / Đổi trạng thái / Đổi tên</b> mẫu có sẵn · <b>không bật Hiệu lực</b> (mẫu mới để Không hiệu lực) · dừng khi domain EasyHRM khác hồ sơ dự án.
         </div>
       </Section>
     </>

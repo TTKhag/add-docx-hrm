@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { AgentPanel } from '@/modules/agent';
+import type { ContractClass, DocType, Session } from '@/db/types';
+import { AgentPanel, promptAnalyze, promptCreate } from '@/modules/agent';
 import { catalogId, DOC_TYPE_LABEL, useCatalog } from '@/modules/catalog';
+import { DECISION_TYPES } from '@/modules/catalog/services/catalog';
 import { useProjects } from '@/modules/projects';
 import { Confirm, copyText, download, Empty, Field, Modal, PageHeader, Section, Spinner, Stat } from '@/shared/components/ui';
 import { errorMessage, toast } from '@/shared/components/toast';
@@ -13,8 +15,14 @@ import { useLogs, useReports, useRows, useSession, useSessionFile } from '../hoo
 import type { VerifyIssue } from '../services/docx';
 import { GAP_LABEL, gapReport } from '../services/mapping';
 import {
-  approveAllWithField, type ApproveResult, approveSession, deleteSession, handToClaude, markActivated, updateTemplateInfo,
+  acceptAllProposals, approveAllWithField, type ApproveResult, approveSession, deleteSession, handToClaude, handToHrm, markActivated,
+  updateSessionMeta, updateTemplateInfo,
 } from '../services/session.workflow';
+
+const CONTRACT_CLASS: Record<ContractClass, string> = {
+  xac_dinh: 'Xác định thời hạn', khong_xac_dinh: 'Không xác định thời hạn', thu_viec: 'Thử việc', cong_tac_vien: 'Cộng tác viên', khac: 'Hợp đồng khác',
+};
+const META_SOURCE = { quy_tac: 'Studio tự nhận', ai: 'AI đã kiểm', nguoi_dung: 'Bạn đã sửa' } as const;
 
 const TABS = [
   { id: 'bang-ghep', label: 'Bảng ghép' },
@@ -36,6 +44,7 @@ export default function SessionPage() {
   const [approveResult, setApproveResult] = useState<ApproveResult | null>(null);
   const [acceptWarn, setAcceptWarn] = useState(false);
   const [editInfo, setEditInfo] = useState(false);
+  const [editMeta, setEditMeta] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmActivated, setConfirmActivated] = useState(false);
 
@@ -50,14 +59,39 @@ export default function SessionPage() {
   const approved = rows.filter((r) => r.status === 'duyet').length;
   const gaps = gapReport(rows);
 
-  const agentUrl = `${location.origin}${location.pathname}#/phien/${session.id}/ai`;
-  const prompt = `Dùng skill easyhrm-template-studio. Mở Template Studio tại ${agentUrl} và làm phiên ${session.id}.`;
+  const prompt = promptAnalyze([session.id]);
+  const canHandHrm = session.status === 'da_duyet' || session.status === 'dung';
 
+  const copyPrompt = async (text: string) => {
+    if (await copyText(text)) toast.ok('Đã chép câu lệnh', 'Dán vào Claude (đã cài skill easyhrm-template-studio).');
+    else toast.warn('Không chép được tự động', text);
+  };
   const giveToClaude = async () => {
     await handToClaude(session.id);
-    const ok = await copyText(prompt);
-    if (ok) toast.ok('Đã chép câu lệnh', 'Dán vào Claude (đã cài skill easyhrm-template-studio).');
-    else toast.warn('Không chép được tự động', prompt);
+    await copyPrompt(prompt);
+  };
+  const giveToHrm = async () => {
+    const r = await handToHrm([session.id]);
+    if (!r.queued.length) return toast.bad('Chưa giao được', r.refused[0]?.reason);
+    await copyPrompt(promptCreate([session.id], project?.name));
+  };
+  /** FR-09: one click — accept every proposal, then write and verify the file. */
+  const acceptAndApprove = async () => {
+    setApproving(true);
+    try {
+      const a = await acceptAllProposals(session.id);
+      if (a.left.length) {
+        toast.warn(`Còn ${a.left.length} dòng chưa có đề xuất`, `${a.left.join(', ')} — chọn trường hoặc Bỏ.`);
+        return;
+      }
+      const r = await approveSession(session.id, false);
+      setApproveResult(r);
+      if (r.ok) toast.ok('Đã duyệt phiên', `${a.approved} duyệt, ${a.skipped} bỏ · ${r.keys.length} key. Giao Claude tạo trên EasyHRM.`);
+    } catch (e) {
+      toast.bad('Không duyệt được', errorMessage(e));
+    } finally {
+      setApproving(false);
+    }
   };
 
   const runApprove = async (accept = false) => {
@@ -80,8 +114,9 @@ export default function SessionPage() {
         title={session.fileName}
         sub={<span className="flex flex-wrap items-center gap-2"><StatusTag status={session.status} /> {DOC_TYPE_LABEL[session.docType]}{session.decisionType ? ` · ${session.decisionType}` : ''} · {project?.name ?? '—'} · EasyHRM {session.hrmVersion}</span>}
         actions={<>
-          {editable && <button className="btn btn-ghost" onClick={giveToClaude} data-testid="give-to-claude">Giao cho Claude</button>}
-          {editable && <button className="btn" onClick={() => runApprove(false)} disabled={approving} data-testid="approve-session">{approving ? 'Đang kiểm tra' : 'Duyệt phiên'}</button>}
+          {editable && <button className="btn btn-ghost" onClick={giveToClaude} data-testid="give-to-claude">Giao Claude phân tích</button>}
+          {editable && <button className="btn" onClick={acceptAndApprove} disabled={approving} data-testid="accept-approve">{approving ? 'Đang kiểm tra' : 'Duyệt toàn bộ đề xuất'}</button>}
+          {canHandHrm && <button className="btn" onClick={giveToHrm} data-testid="give-to-hrm">{session.handedToHrmAt ? 'Chép lại câu lệnh tạo' : 'Giao Claude tạo trên EasyHRM'}</button>}
           {file?.output && <button className="btn" onClick={() => download(file.output!, file.outputName ?? 'mau_TenKey.docx')} data-testid="download-output">Tải .docx</button>}
           {session.status === 'da_tao' && <button className="btn" onClick={() => setConfirmActivated(true)}>Đã bật Hiệu lực</button>}
         </>}
@@ -100,14 +135,21 @@ export default function SessionPage() {
         <Stat label="Tham số thiếu" value={gaps.length} accent={gaps.length ? 'bad' : undefined} />
       </div>
 
-      <div className="card mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="label">Mẫu trên EasyHRM</div>
-          <div className="font-bold">{session.templateCode ? `${session.templateCode} · ` : ''}{session.templateName ?? '—'}</div>
-        </div>
-        <div className="flex gap-2">
-          <button className="chip" onClick={() => setEditInfo(true)}>Sửa mã / tên mẫu</button>
-          <button className="chip" onClick={() => setConfirmDelete(true)}>Xóa phiên</button>
+      <div className="card mb-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="grid flex-1 gap-x-6 gap-y-2" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,200px),1fr))' }}>
+            <div><div className="label">Mẫu trên EasyHRM</div><div className="font-bold">{session.templateCode ? `${session.templateCode} · ` : ''}{session.templateName ?? '—'}</div></div>
+            <div><div className="label">Loại</div><div>{DOC_TYPE_LABEL[session.docType]}{session.docType === 'quyet_dinh' && <> · {session.decisionType ?? <span className="tag tag-warn">chưa rõ loại QĐ</span>}</>}</div></div>
+            {session.docType !== 'quyet_dinh' && <div><div className="label">Phân loại HĐ</div><div>{session.docMeta?.contractClass ? CONTRACT_CLASS[session.docMeta.contractClass] : '—'}{session.docMeta?.termMonths ? ` · ${session.docMeta.termMonths} tháng` : ''}</div></div>}
+            {session.docType !== 'quyet_dinh' && <div><div className="label">Người ký công ty</div><div>{session.signing?.companySignerName ?? session.signing?.companyTitle ?? project?.signerDefaults?.companySignerName ?? '—'}{session.signing?.companyAnchor && <div className="text-xs text-mut">Mốc: {session.signing.companyAnchor}</div>}</div></div>}
+            <div><div className="label">Chế độ</div><div>{session.mode === 'da_co_key' ? 'Tệp đã có key' : 'Chèn key'}</div></div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {session.docMeta && <span className="tag">{META_SOURCE[session.docMeta.source]}</span>}
+            {editable && <button className="chip" onClick={() => setEditMeta(true)} data-testid="edit-meta">Sửa thông tin mẫu</button>}
+            <button className="chip" onClick={() => setEditInfo(true)}>Sửa mã mẫu</button>
+            <button className="chip" onClick={() => setConfirmDelete(true)}>Xóa phiên</button>
+          </div>
         </div>
       </div>
 
@@ -124,6 +166,7 @@ export default function SessionPage() {
         <>
           <div className="mb-4 flex flex-wrap gap-3">
             {editable && <button className="btn btn-ghost btn-sm" onClick={async () => toast.info('Đã duyệt', `${await approveAllWithField(session.id)} dòng đã có trường`)} data-testid="approve-all">Duyệt các dòng đã có trường</button>}
+            {editable && <button className="btn btn-ghost btn-sm" onClick={() => runApprove(false)} disabled={approving} data-testid="approve-session">Duyệt phiên (theo bảng hiện tại)</button>}
             <button className="btn btn-ghost btn-sm" onClick={() => setShowPreview((v) => !v)} data-testid="toggle-preview">{showPreview ? 'Ẩn xem trước' : 'Hiện xem trước'}</button>
           </div>
           <div className={`grid gap-[22px] ${showPreview ? 'xl:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]' : ''}`}>
@@ -156,6 +199,8 @@ export default function SessionPage() {
 
       {editInfo && <TemplateInfoDialog open={editInfo} onClose={() => setEditInfo(false)} code={session.templateCode ?? ''} name={session.templateName ?? ''}
         onSave={async (c, n) => { await updateTemplateInfo(session.id, c, n); setEditInfo(false); toast.ok('Đã lưu'); }} />}
+
+      {editMeta && <MetaDialog session={session} onClose={() => setEditMeta(false)} />}
 
       <Confirm open={confirmDelete} title="Xóa phiên" danger confirmLabel="Xóa phiên" onClose={() => setConfirmDelete(false)}
         body={<>Xóa phiên <b>{session.fileName}</b> cùng file gốc, bảng ghép, nhật ký? Mẫu đã tạo trên EasyHRM (nếu có) không bị ảnh hưởng.</>}
@@ -222,6 +267,8 @@ function ReportsTab({ sessionId }: { sessionId: string }) {
             <List title="Người dùng làm thay" items={r.userSteps} />
             <List title="Key đã ghép" items={r.mappedKeys.map((k) => `{{${k}}}`)} />
             <List title="Key chưa ghép" items={r.unmappedKeys.map((k) => `{{${k}}}`)} />
+            {!!r.createdExtraFields?.length && <List title="Trường bổ sung Claude đã tạo" items={r.createdExtraFields.map((x) => `{{${x.key}}} · ${x.label}`)} />}
+            {r.signer && <List title="Người ký" items={[r.signer]} />}
           </div>
           {r.hrmMessages.length > 0 && <div className="panel mt-3"><b>Thông báo EasyHRM:</b> {r.hrmMessages.join(' · ')}</div>}
         </div>
@@ -245,5 +292,66 @@ function LogsTab({ sessionId }: { sessionId: string }) {
         <tr key={l.id}><td className="whitespace-nowrap text-mut">{formatDateTime(l.at)}</td><td><span className={`tag ${l.actor === 'ai' ? 'tag-ink' : ''}`}>{ACTOR[l.actor]}</span></td><td className="font-bold">{l.action}</td><td className="text-[13px]">{l.detail}</td></tr>
       ))}</tbody>
     </table>
+  );
+}
+
+function MetaDialog({ session, onClose }: { session: Session; onClose: () => void }) {
+  const [docType, setDocType] = useState<DocType>(session.docType);
+  const [decisionType, setDecisionType] = useState(session.decisionType ?? '');
+  const [name, setName] = useState(session.templateName ?? '');
+  const [cc, setCc] = useState<ContractClass | ''>(session.docMeta?.contractClass ?? '');
+  const [term, setTerm] = useState(session.docMeta?.termMonths ? String(session.docMeta.termMonths) : '');
+  const [title, setTitle] = useState(session.signing?.companyTitle ?? '');
+  const [signer, setSigner] = useState(session.signing?.companySignerName ?? '');
+  const typeChanged = docType !== session.docType || (docType === 'quyet_dinh' && decisionType !== (session.decisionType ?? ''));
+  const save = async () => {
+    try {
+      await updateSessionMeta(session.id, {
+        docType, decisionType: docType === 'quyet_dinh' ? decisionType || undefined : undefined, templateName: name,
+        contractClass: cc || undefined, termMonths: term ? Number(term) : null,
+        signing: docType === 'quyet_dinh' ? undefined : { companyTitle: title || undefined, companySignerName: signer || undefined },
+      }, 'nguoi_dung');
+      toast.ok('Đã lưu thông tin mẫu');
+      onClose();
+    } catch (e) {
+      toast.bad('Không lưu được', errorMessage(e));
+    }
+  };
+  return (
+    <Modal title="Thông tin mẫu" open onClose={onClose} wide footer={<>
+      <button className="btn btn-ghost" onClick={onClose}>Huỷ</button>
+      <button className="btn" onClick={save} disabled={!name.trim() || (docType === 'quyet_dinh' && !decisionType)} data-testid="meta-save">Lưu</button>
+    </>}>
+      <div className="grid gap-x-4 sm:grid-cols-2">
+        <Field label="Loại văn bản" htmlFor="m-doc">
+          <select id="m-doc" className="select" value={docType} onChange={(e) => setDocType(e.target.value as DocType)}>
+            {(Object.keys(DOC_TYPE_LABEL) as DocType[]).map((t) => <option key={t} value={t}>{DOC_TYPE_LABEL[t]}</option>)}
+          </select>
+        </Field>
+        {docType === 'quyet_dinh' && (
+          <Field label="Loại quyết định" htmlFor="m-dt" hint="Theo danh mục EasyHRM. Đổi loại sẽ bỏ các trường không thuộc loại mới.">
+            <select id="m-dt" className="select" value={decisionType} onChange={(e) => setDecisionType(e.target.value)}>
+              <option value="">— Chọn —</option>
+              {[...new Set([...DECISION_TYPES, ...(session.decisionType ? [session.decisionType] : [])])].map((d) => <option key={d}>{d}</option>)}
+            </select>
+          </Field>
+        )}
+      </div>
+      <Field label="Tên mẫu trên EasyHRM" htmlFor="m-name"><input id="m-name" className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={255} /></Field>
+      {docType !== 'quyet_dinh' && (<>
+        <div className="grid gap-x-4 sm:grid-cols-2">
+          <Field label="Phân loại hợp đồng" htmlFor="m-cc">
+            <select id="m-cc" className="select" value={cc} onChange={(e) => setCc(e.target.value as ContractClass | '')}>
+              <option value="">— Chưa rõ —</option>
+              {(Object.keys(CONTRACT_CLASS) as ContractClass[]).map((c) => <option key={c} value={c}>{CONTRACT_CLASS[c]}</option>)}
+            </select>
+          </Field>
+          <Field label="Thời hạn (tháng)" htmlFor="m-term"><input id="m-term" className="input" inputMode="numeric" value={term} onChange={(e) => setTerm(e.target.value.replace(/\D/g, ''))} disabled={cc === 'khong_xac_dinh'} /></Field>
+          <Field label="Chức danh người ký công ty" htmlFor="m-title"><input id="m-title" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Giám đốc" /></Field>
+          <Field label="Tên người ký (nếu cố định)" htmlFor="m-signer" hint="Phải có trong Thiết lập người đại diện ký"><input id="m-signer" className="input" value={signer} onChange={(e) => setSigner(e.target.value)} /></Field>
+        </div>
+      </>)}
+      {typeChanged && <div className="panel panel-warn text-[13px]">Đổi loại sẽ bỏ các trường không thuộc danh mục của loại mới (trường bổ sung giữ nguyên).</div>}
+    </Modal>
   );
 }

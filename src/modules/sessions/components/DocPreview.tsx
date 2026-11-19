@@ -1,33 +1,77 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MappingRow } from '@/db/types';
-import { readDocx, type ParsedParagraph } from '../services/docx';
+import { buildPreviewDocx, PREVIEW_MARK_RE } from '../services/docx';
+import { wrapKey } from '../services/tenKey';
 
-/** Plain-text preview of the original file with candidates highlighted. Hidden while Claude works (SEC-05). */
+/**
+ * Word-like preview (FR-10): the original .docx rendered with docx-preview (tables, bold, alignment kept),
+ * candidates coloured by status. Hidden while Claude works (SEC-05): it shows unmasked values.
+ */
 export function DocPreview({ file, rows }: { file: Blob; rows: MappingRow[] }) {
-  const [paras, setParas] = useState<ParsedParagraph[] | null>(null);
-  const [err, setErr] = useState<string>();
+  const host = useRef<HTMLDivElement>(null);
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading');
+  const sig = rows.map((r) => `${r.id}:${r.status}:${r.key ?? ''}:${r.fieldCode ?? ''}`).join('|');
+
   useEffect(() => {
     let alive = true;
-    readDocx(file).then((d) => alive && setParas(d.paragraphs)).catch(() => alive && setErr('Không hiển thị được xem trước.'));
+    const el = host.current;
+    if (!el) return;
+    setState('loading');
+    (async () => {
+      const { renderAsync } = await import('docx-preview');
+      const blob = await buildPreviewDocx(file, rows.map((r) => ({
+        location: r.location,
+        expected: r.text,
+        id: r.candidateId,
+        display: r.key ? wrapKey(r.key) : r.fixedKey ? wrapKey(r.fixedKey) : r.text,
+      })));
+      if (!alive) return;
+      el.innerHTML = '';
+      await renderAsync(blob, el, undefined, { inWrapper: true, ignoreWidth: false, breakPages: true, renderHeaders: true, renderFooters: true, className: 'docx' });
+      if (!alive) return;
+      decorate(el, rows);
+      setState('ok');
+    })().catch(() => alive && setState('error'));
     return () => { alive = false; };
-  }, [file]);
-  if (err) return <div className="panel panel-warn">{err}</div>;
-  if (!paras) return <div className="text-mut">Đang dựng xem trước…</div>;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, sig]);
+
   return (
-    <div className="max-h-[70vh] overflow-y-auto border-2 border-black bg-white p-4 text-[13px] leading-relaxed" data-testid="doc-preview">
-      {paras.filter((p) => p.text.trim()).map((p) => {
-        const marks = rows.filter((r) => r.location.part === p.part && r.location.paragraph === p.index).sort((a, b) => a.location.start - b.location.start);
-        const out: React.ReactNode[] = [];
-        let pos = 0;
-        for (const r of marks) {
-          out.push(p.text.slice(pos, r.location.start));
-          const cls = r.status === 'bo' ? 'hl-skip' : r.status === 'duyet' ? 'hl' : 'hl-pending';
-          out.push(<span key={r.id} className={cls} title={r.candidateId}>{r.key ? `{{${r.key}}}` : p.text.slice(r.location.start, r.location.end)}<sup className="ml-0.5 text-[9px] font-bold">{r.candidateId}</sup></span>);
-          pos = r.location.end;
-        }
-        out.push(p.text.slice(pos));
-        return <p key={`${p.part}-${p.index}`} className={`my-1.5 ${p.part !== 'word/document.xml' ? 'text-mut' : ''}`}>{out}</p>;
-      })}
+    <div className="relative">
+      {state === 'loading' && <div className="mb-2 text-mut">Đang dựng xem trước…</div>}
+      {state === 'error' && <div className="panel panel-warn mb-2">Không dựng được bản xem trước dạng Word cho tệp này.</div>}
+      <div ref={host} className="docx-host max-h-[75vh] overflow-auto border-2 border-black bg-[#e9e9e9]" data-testid="doc-preview" />
+      <div className="mt-2 flex flex-wrap gap-3 text-xs"><span className="hl-pending px-1">Chờ duyệt</span><span className="hl px-1">Đã duyệt</span><span className="hl-skip px-1">Bỏ</span></div>
     </div>
   );
+}
+
+/** Replace ⟦c7|text⟧ markers in rendered text nodes by coloured spans. */
+function decorate(root: HTMLElement, rows: MappingRow[]) {
+  const status = new Map(rows.map((r) => [r.candidateId, r.status]));
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) if ((walker.currentNode as Text).data.includes('⟦')) nodes.push(walker.currentNode as Text);
+  for (const node of nodes) {
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    const text = node.data;
+    for (const m of text.matchAll(PREVIEW_MARK_RE)) {
+      const i = m.index ?? 0;
+      frag.append(text.slice(pos, i));
+      const st = status.get(m[1]);
+      const span = document.createElement('span');
+      span.className = st === 'bo' ? 'hl-skip' : st === 'duyet' ? 'hl' : 'hl-pending';
+      span.title = m[1];
+      span.textContent = m[2];
+      const sup = document.createElement('sup');
+      sup.textContent = m[1];
+      sup.style.cssText = 'font-size:8px;font-weight:700;margin-left:1px';
+      span.append(sup);
+      frag.append(span);
+      pos = i + m[0].length;
+    }
+    frag.append(text.slice(pos));
+    node.replaceWith(frag);
+  }
 }

@@ -61,13 +61,20 @@ export function Field({ label, error, hint, children, htmlFor }: { label: string
 
 export function Modal({ title, open, onClose, children, footer, wide }: { title: string; open: boolean; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Keep the latest onClose without re-running the focus effect: parents pass a new arrow function on every render,
+  // and re-focusing on each keystroke used to throw the caret out of the input (bug "chỉ gõ được 1 ký tự").
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onCloseRef.current();
     document.addEventListener('keydown', onKey);
-    ref.current?.querySelector<HTMLElement>('input,select,textarea,button')?.focus();
+    const first = bodyRef.current?.querySelector<HTMLElement>('input:not([type=hidden]):not([disabled]),select,textarea')
+      ?? ref.current?.querySelector<HTMLElement>('[data-autofocus],button');
+    first?.focus();
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-[8vh]" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -76,7 +83,7 @@ export function Modal({ title, open, onClose, children, footer, wide }: { title:
           <h3 className="m-0 text-[13px] font-extrabold uppercase tracking-[.14em]">{title}</h3>
           <button className="text-white" onClick={onClose} aria-label="Đóng">✕</button>
         </div>
-        <div className="px-5 py-4">{children}</div>
+        <div ref={bodyRef} className="px-5 py-4">{children}</div>
         {footer && <div className="flex flex-wrap justify-end gap-3 border-t-2 border-black px-5 py-4">{footer}</div>}
       </div>
     </div>

@@ -33,8 +33,8 @@ interface RowProps {
 
 const Row = memo(function Row({ row, fields, groups, locked }: RowProps) {
   const field = fields.find((f) => f.code === row.fieldCode);
-  const selectValue = row.gapGroup ? OPT_GAP : isExtraField(row.fieldCode) ? OPT_EXTRA : row.fieldCode ?? '';
-  const preview = row.key ?? (field ? toTenKey(field.label) : row.extraLabel ? toTenKey(row.extraLabel) : undefined);
+  const selectValue = isExtraField(row.fieldCode) ? OPT_EXTRA : row.gapGroup ? OPT_GAP : row.fieldCode ?? '';
+  const preview = row.key ?? row.fixedKey ?? (field ? toTenKey(field.label) : row.extraLabel ? toTenKey(row.extraLabel) : undefined);
 
   const patch = async (p: Partial<MappingRow>) => {
     try {
@@ -62,7 +62,7 @@ const Row = memo(function Row({ row, fields, groups, locked }: RowProps) {
             <optgroup key={g} label={g}>{fs.map((f) => <option key={f.code} value={f.code}>{f.label}</option>)}</optgroup>
           ))}
           <optgroup label="Khác">
-            <option value={OPT_EXTRA}>+ Trường giá trị bổ sung (nhập mỗi lần)</option>
+            <option value={OPT_EXTRA}>+ Trường giá trị bổ sung (Claude tự tạo trên EasyHRM)</option>
             <option value={OPT_GAP}>! Tham số EasyHRM chưa có</option>
           </optgroup>
         </select>
@@ -86,6 +86,9 @@ const Row = memo(function Row({ row, fields, groups, locked }: RowProps) {
       <td className="whitespace-nowrap">
         {row.source && <span className="tag">{SOURCE_LABEL[row.source]}</span>}{' '}
         {row.confidence && <span className={`tag ${row.confidence === 'thap' ? 'tag-warn' : ''}`}>{CONF_LABEL[row.confidence]}</span>}
+        {row.proposedSkip && row.status === 'cho' && <span className="tag tag-warn" data-testid={`row-skip-${row.candidateId}`}>Đề xuất Bỏ</span>}
+        {row.addedBy === 'ai' && <span className="tag">AI thêm</span>}
+        {row.fixedKey && <span className="tag">Key có sẵn</span>}
         {row.reason && <div className="mt-1 max-w-[200px] whitespace-normal text-xs text-mut">{row.reason}</div>}
       </td>
       <td>

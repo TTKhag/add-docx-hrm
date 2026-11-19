@@ -12,6 +12,14 @@ export type SessionStatus =
   | 'hoan_tat'    // Người dùng đã bật hiệu lực
   | 'dung';       // Dừng giữa chừng
 
+/** Optional per-project defaults Claude uses for contract signers (EasyHRM "Thiết lập người ký"). */
+export interface SignerDefaults {
+  companySignerName?: string;  // must exist in "Thiết lập người đại diện ký"
+  signMethod?: string;         // Hình thức ký
+  digitalSignMethod?: string;  // Hình thức ký số
+  otpMethod?: string;          // Hình thức nhận OTP
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -20,8 +28,36 @@ export interface Project {
   username: string;
   hrmVersion: string;
   note?: string;
+  signerDefaults?: SignerDefaults;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 'chen_key': Studio inserts keys · 'da_co_key': the file already holds {{Key}}s, keep them. */
+export type SessionMode = 'chen_key' | 'da_co_key';
+
+export type ContractClass = 'xac_dinh' | 'khong_xac_dinh' | 'thu_viec' | 'cong_tac_vien' | 'khac';
+
+/** What Studio/AI read from the document itself (title, type, contract classification). */
+export interface DocMeta {
+  title?: string;               // first heading, e.g. "QUYẾT ĐỊNH"
+  subject?: string;             // "Về việc bổ nhiệm lại ..."
+  detectedDocType?: DocType;
+  detectedDecisionType?: string;
+  contractClass?: ContractClass;
+  termMonths?: number;
+  source: 'quy_tac' | 'ai' | 'nguoi_dung';
+  confidence?: Confidence;
+  note?: string;
+}
+
+/** Signature block analysis (contracts): who signs for the company and the anchor texts for drag-and-drop. */
+export interface Signing {
+  companyTitle?: string;        // "Giám đốc"
+  companySignerName?: string;   // only when the template itself names a fixed signer
+  employeeAnchor?: string;      // "NGƯỜI LAO ĐỘNG"
+  companyAnchor?: string;       // "ĐẠI DIỆN NGƯỜI SỬ DỤNG LAO ĐỘNG"
+  source: 'quy_tac' | 'ai' | 'nguoi_dung';
 }
 
 export interface Session {
@@ -35,6 +71,12 @@ export interface Session {
   templateCode?: string;
   templateName?: string;
   approvedAt?: number;
+  mode?: SessionMode;           // v2; undefined = 'chen_key'
+  docMeta?: DocMeta;            // v2
+  signing?: Signing;            // v2
+  queueOrder?: number;          // v2: order inside the work queue (upload order)
+  batchId?: string;             // v2: files uploaded together
+  handedToHrmAt?: number;       // v2: user handed this approved session to Claude for EasyHRM
   createdAt: number;
   updatedAt: number;
 }
@@ -56,7 +98,8 @@ export interface DocLocation {
 
 export type RuleHint =
   | 'dotted_blank' | 'underscore_blank' | 'bracket' | 'date' | 'date_words'
-  | 'money' | 'id_number' | 'phone' | 'person_name' | 'existing_key' | 'manual';
+  | 'money' | 'id_number' | 'phone' | 'person_name' | 'existing_key' | 'manual'
+  | 'date_blank' | 'doc_number' | 'ai_added';
 
 export type RowSource = 'quy_tac' | 'ai' | 'nguoi_dung';
 export type Confidence = 'cao' | 'trung_binh' | 'thap';
@@ -81,6 +124,9 @@ export interface MappingRow {
   status: RowStatus;
   gapGroup?: GapGroup;
   gapNote?: string;
+  fixedKey?: string;     // v2: key already in the file (mode da_co_key) — kept as is
+  proposedSkip?: boolean; // v2: AI suggests "Bỏ" (fixed content); applied by "Duyệt toàn bộ đề xuất"
+  addedBy?: 'ai';        // v2: candidate added by the AI from the full text
 }
 
 export type FieldKind = 'text' | 'date' | 'number';
@@ -127,6 +173,8 @@ export type HrmOutcome = 'thanh_cong' | 'dung_giua_chung' | 'that_bai';
 
 export interface HrmReport {
   id?: number;
+  createdExtraFields?: { key: string; label: string }[]; // v2
+  signer?: string;                                         // v2
   sessionId: string;
   at: number;
   outcome: HrmOutcome;

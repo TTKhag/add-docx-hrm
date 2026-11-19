@@ -53,5 +53,7 @@ export function uniqueKey(key: string, taken: Set<string>, groupLabel?: string):
 
 /** Turn a key found in an existing file ({{ho_ten}}, {{Họ và tên}}) into a proposed TenKey. */
 export function normalizeExistingKey(raw: string): string {
-  return toTenKey(raw.replace(/_/g, ' '));
+  const t = raw.trim();
+  if (isValidTenKey(t)) return t; // already PascalCase: keep as written ({{HoVaTen}} stays HoVaTen)
+  return toTenKey(t.replace(/_/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2'));
 }

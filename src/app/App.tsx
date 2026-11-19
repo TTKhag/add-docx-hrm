@@ -1,6 +1,7 @@
 import { Suspense, useEffect } from 'react';
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { requestPersistentStorage } from '@/db/schema';
+import { BridgePage } from '@/modules/agent';
 import { BackupPage } from '@/modules/backup';
 import { CatalogPage } from '@/modules/catalog';
 import { ProjectsPage } from '@/modules/projects';
@@ -29,6 +30,7 @@ export default function App() {
             <Route path="/du-an" element={guard('Hồ sơ dự án', <ProjectsPage />)} />
             <Route path="/danh-muc" element={guard('Danh mục trường', <CatalogPage />)} />
             <Route path="/claude" element={guard('Cài vào Claude', <SkillPage />)} />
+            <Route path="/cau-noi/:id" element={guard('Cầu nối tệp', <BridgePage />)} />
             <Route path="/sao-luu" element={guard('Sao lưu', <BackupPage />)} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

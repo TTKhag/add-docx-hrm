@@ -4,7 +4,7 @@ import type {
 } from './types';
 
 export const DB_NAME = 'add-docx-hrm';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 export class StudioDB extends Dexie {
   projects!: Table<Project, string>;
@@ -19,8 +19,8 @@ export class StudioDB extends Dexie {
 
   constructor(name = DB_NAME) {
     super(name);
-    // Version 1. On any schema change: add db.version(2).stores({...}).upgrade(...) — never drop user data.
-    this.version(DB_VERSION).stores({
+    // Never drop user data: each new version only adds indexes and back-fills fields.
+    this.version(1).stores({
       projects: 'id, name, updatedAt',
       sessions: 'id, projectId, status, updatedAt',
       files: 'sessionId',
@@ -31,6 +31,18 @@ export class StudioDB extends Dexie {
       hrmReports: '++id, sessionId, at',
       settings: 'key',
     });
+    // v2: work queue (queueOrder) + new optional fields on sessions/rows/projects.
+    this.version(2)
+      .stores({ sessions: 'id, projectId, status, updatedAt, queueOrder' })
+      .upgrade(async (tx) => {
+        const all = await tx.table<Session>('sessions').toArray();
+        all.sort((a, b) => a.createdAt - b.createdAt);
+        let n = 0;
+        for (const s of all) {
+          n++;
+          await tx.table('sessions').update(s.id, { mode: s.mode ?? 'chen_key', queueOrder: s.queueOrder ?? n });
+        }
+      });
   }
 }
 

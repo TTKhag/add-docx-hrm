@@ -169,6 +169,39 @@ export async function applyReplacements(
   return { blob, applied };
 }
 
+export interface PreviewMark {
+  location: DocLocation;
+  expected: string;
+  id: string;      // candidate id
+  display: string; // what to show (key or original text)
+}
+
+export const PREVIEW_MARK_RE = /⟦(c\d+)\|([^⟧]*)⟧/g;
+
+/**
+ * Formatting-preserving preview (FR-10): copy of the ORIGINAL file where each candidate becomes ⟦c7|display⟧
+ * inside one <w:t>, so the renderer keeps fonts/tables and the UI can colour the markers. Never exported or uploaded.
+ */
+export async function buildPreviewDocx(data: Blob | ArrayBuffer | Uint8Array, marks: PreviewMark[]): Promise<Blob> {
+  const zip = await loadZip(data);
+  const byPart = new Map<string, PreviewMark[]>();
+  for (const m of marks) byPart.set(m.location.part, [...(byPart.get(m.location.part) ?? []), m]);
+  for (const [part, list] of byPart) {
+    const file = zip.file(part);
+    if (!file) continue;
+    const doc = parseXml(await file.async('string'));
+    const paras = paragraphsOf(doc);
+    const sorted = [...list].sort((a, b) => a.location.paragraph - b.location.paragraph || b.location.start - a.location.start);
+    for (const m of sorted) {
+      const p = paras[m.location.paragraph];
+      if (!p || paragraphText(p).slice(m.location.start, m.location.end) !== m.expected) continue; // stale mark: skip, preview only
+      replaceRange(p, m.location.start, m.location.end, `⟦${m.id}|${m.display.replace(/[⟦⟧|]/g, '')}⟧`);
+    }
+    zip.file(part, new XMLSerializer().serializeToString(doc));
+  }
+  return zip.generateAsync({ type: 'blob', mimeType: DOCX_MIME });
+}
+
 async function scrubCoreProps(zip: JSZip) {
   const core = zip.file('docProps/core.xml');
   if (!core) return;

@@ -68,7 +68,7 @@ export function suggestByCue(before: string, fields: CatalogField[]): Suggestion
 export function suggestForExistingKey(raw: string, fields: CatalogField[]): Suggestion | undefined {
   const inner = raw.replace(/^\{\{|\}\}$/g, '');
   const target = normalizeExistingKey(inner);
-  const f = fields.find((x) => toTenKey(x.label) === target);
+  const f = fields.find((x) => toTenKey(x.label).toLowerCase() === target.toLowerCase());
   if (f) return { fieldCode: f.code, confidence: 'cao', reason: 'Key có sẵn trùng tên trường' };
   return undefined;
 }

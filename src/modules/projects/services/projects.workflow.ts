@@ -18,6 +18,14 @@ export async function saveProject(input: ProjectInput, id?: string): Promise<{ o
     username: v.value.username,
     hrmVersion: v.value.hrmVersion,
     note: v.value.note || undefined,
+    signerDefaults: [v.value.companySignerName, v.value.signMethod, v.value.digitalSignMethod, v.value.otpMethod].some(Boolean)
+      ? {
+        companySignerName: v.value.companySignerName || undefined,
+        signMethod: v.value.signMethod || undefined,
+        digitalSignMethod: v.value.digitalSignMethod || undefined,
+        otpMethod: v.value.otpMethod || undefined,
+      }
+      : undefined,
     createdAt: prev?.createdAt ?? now,
     updatedAt: now,
   };

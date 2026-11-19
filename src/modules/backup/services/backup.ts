@@ -70,7 +70,14 @@ export const backupSchema = z.object({
 
 export type BackupSummary = { projects: number; sessions: number; catalogs: number };
 
-/** Validate and migrate a backup. Only schema v1 exists today; future versions migrate here. */
+/** v1 → v2: sessions get mode + queueOrder (same back-fill as the Dexie upgrade). */
+export function migrateBackupTables(schemaVersion: number, t: z.infer<typeof backupSchema>['tables']): z.infer<typeof backupSchema>['tables'] {
+  if (schemaVersion >= 2) return t;
+  const sessions = [...t.sessions].sort((a, b) => Number(a.createdAt ?? 0) - Number(b.createdAt ?? 0));
+  return { ...t, sessions: sessions.map((s, i) => ({ ...s, mode: s.mode ?? 'chen_key', queueOrder: s.queueOrder ?? i + 1 })) };
+}
+
+/** Validate and migrate a backup to the current schema. */
 export function parseBackup(text: string): { ok: true; data: z.infer<typeof backupSchema>; summary: BackupSummary } | { ok: false; message: string } {
   let json: unknown;
   try {
@@ -81,8 +88,8 @@ export function parseBackup(text: string): { ok: true; data: z.infer<typeof back
   const r = backupSchema.safeParse(json);
   if (!r.success) return { ok: false, message: 'Tệp không đúng định dạng sao lưu của Studio.' };
   if (r.data.schemaVersion > DB_VERSION) return { ok: false, message: 'Tệp sao lưu từ phiên bản Studio mới hơn — hãy cập nhật Studio.' };
-  const t = r.data.tables;
-  return { ok: true, data: r.data, summary: { projects: t.projects.length, sessions: t.sessions.length, catalogs: t.catalogs.length } };
+  const t = migrateBackupTables(r.data.schemaVersion, r.data.tables);
+  return { ok: true, data: { ...r.data, schemaVersion: DB_VERSION, tables: t }, summary: { projects: t.projects.length, sessions: t.sessions.length, catalogs: t.catalogs.length } };
 }
 
 /** Replace all data with the backup (single transaction). */
