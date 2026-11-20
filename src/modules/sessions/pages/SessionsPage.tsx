@@ -1,24 +1,20 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Session, SessionStatus } from '@/db/types';
-import { promptAnalyze, promptCreate } from '@/modules/agent';
+import { handOffToClaude } from '@/modules/agent';
+import { mirrorAfterApprove } from '@/modules/handoff';
 import { DOC_TYPE_LABEL } from '@/modules/catalog/services/catalog';
 import { useProjects } from '@/modules/projects';
-import { copyText, Empty, PageHeader, Section, Spinner, Stat } from '@/shared/components/ui';
+import { Empty, PageHeader, Section, Spinner, Stat } from '@/shared/components/ui';
 import { errorMessage, toast } from '@/shared/components/toast';
 import { formatDateTime } from '@/shared/utils/text';
 import { StatusTag } from '../components/StatusTag';
 import { useSessions } from '../hooks';
 import { STATUS_LABEL } from '../services/mapping';
-import { acceptAllProposals, approveSession, handToHrm } from '../services/session.workflow';
+import { approveAllAndExport, handToClaude, handToHrm } from '../services/session.workflow';
 
 const FILTERS: (SessionStatus | 'all')[] = ['all', 'nhap', 'cho_ai', 'cho_duyet', 'da_duyet', 'dang_tao', 'da_tao', 'dung', 'hoan_tat'];
 const byQueue = (a: Session, b: Session) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0) || a.createdAt - b.createdAt;
-
-async function copyPrompt(text: string) {
-  if (await copyText(text)) toast.ok('Đã chép câu lệnh', 'Dán vào Claude (skill easyhrm-template-studio).');
-  else toast.warn('Không chép được tự động', text);
-}
 
 export default function SessionsPage() {
   const sessions = useSessions();
@@ -26,6 +22,7 @@ export default function SessionsPage() {
   const [filter, setFilter] = useState<SessionStatus | 'all'>('all');
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [alsoHand, setAlsoHand] = useState(true);
   const projectName = useMemo(() => new Map((projects ?? []).map((p) => [p.id, p.name])), [projects]);
   const sorted = useMemo(() => [...(sessions ?? [])].sort(byQueue), [sessions]);
   const list = sorted.filter((s) => filter === 'all' || s.status === filter);
@@ -36,19 +33,27 @@ export default function SessionsPage() {
   const forAi = sorted.filter((s) => s.status === 'nhap' || s.status === 'cho_ai');
   const queue = sorted.filter((s) => s.handedToHrmAt && ['da_duyet', 'dung', 'dang_tao'].includes(s.status));
 
-  /** One click for the user: accept every proposal, then write + verify the file. */
+  /** FR-40: approve every key of each selected session, export + freeze the package; optionally hand to Claude. */
   const approveSelected = async () => {
     setBusy(true);
-    let ok = 0;
+    const okIds: string[] = [];
     const fails: string[] = [];
     try {
       for (const s of sel.filter((x) => ['nhap', 'cho_ai', 'cho_duyet'].includes(x.status))) {
-        const a = await acceptAllProposals(s.id);
-        const r = await approveSession(s.id, false);
-        if (r.ok) ok++;
-        else fails.push(`${s.fileName}: ${a.left.length ? `${a.left.length} dòng chưa có đề xuất` : r.problems[0] ?? r.issues[0]?.message ?? 'cần xem lại'}`);
+        const r = await approveAllAndExport(s.id, false);
+        if (r.ok) {
+          okIds.push(s.id);
+          await mirrorAfterApprove(r.handoff);
+        } else {
+          const warnOnly = !r.problems.length && r.issues.every((i) => i.level === 'canh_bao');
+          fails.push(`${s.fileName}: ${warnOnly ? 'còn cảnh báo dữ liệu cá nhân — mở phiên để xác nhận' : r.problems[0] ?? r.issues[0]?.message ?? 'cần xem lại'}`);
+        }
       }
-      toast.ok(`Đã duyệt ${ok} phiên`, fails.length ? `Cần mở xem: ${fails.join(' · ')}` : 'Giao Claude tạo trên EasyHRM.');
+      toast.ok(`Đã duyệt ${okIds.length} phiên`, fails.length ? `Cần mở xem: ${fails.join(' · ')}` : alsoHand ? 'Đang giao Claude tạo trên EasyHRM.' : 'Giao Claude tạo trên EasyHRM khi sẵn sàng.');
+      if (alsoHand && okIds.length) {
+        const h = await handToHrm(okIds);
+        await handOffToClaude('tao_hrm', h.queued);
+      }
     } catch (e) {
       toast.bad('Lỗi khi duyệt', errorMessage(e));
     } finally {
@@ -60,8 +65,7 @@ export default function SessionsPage() {
     const ids = sel.filter((s) => s.status === 'da_duyet' || s.status === 'dung').map((s) => s.id);
     if (!ids.length) return toast.warn('Chưa có phiên Đã duyệt trong các phiên chọn');
     const r = await handToHrm(ids);
-    const pj = new Set(sel.filter((s) => r.queued.includes(s.id)).map((s) => projectName.get(s.projectId)));
-    await copyPrompt(promptCreate(r.queued, pj.size === 1 ? [...pj][0] : undefined));
+    await handOffToClaude('tao_hrm', r.queued);
     if (r.refused.length) toast.warn('Một số phiên chưa giao được', r.refused.map((x) => `${x.id}: ${x.reason}`).join(' · '));
   };
 
@@ -71,7 +75,7 @@ export default function SessionsPage() {
         title="Phiên làm việc"
         sub="Hàng đợi văn bản. Bạn chỉ đọc lại và duyệt; Claude phân tích và tạo mẫu trên EasyHRM theo thứ tự."
         actions={<>
-          {forAi.length > 0 && <button className="btn btn-ghost" onClick={() => copyPrompt(promptAnalyze(forAi.map((s) => s.id)))} data-testid="copy-analyze-all">Giao Claude phân tích ({forAi.length})</button>}
+          {forAi.length > 0 && <button className="btn btn-ghost" onClick={async () => { for (const s of forAi) await handToClaude(s.id); await handOffToClaude('phan_tich', forAi.map((s) => s.id)); }} data-testid="copy-analyze-all">Giao Claude phân tích ({forAi.length})</button>}
           <Link to="/phien/moi" className="btn" data-testid="session-new">Tải văn bản</Link>
         </>}
       />
@@ -84,7 +88,8 @@ export default function SessionsPage() {
       </div>
       <Section title="Danh sách" right={sel.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          <button className="btn btn-sm" disabled={busy} onClick={approveSelected} data-testid="bulk-approve">Duyệt toàn bộ đề xuất ({sel.length})</button>
+          <button className="btn btn-sm" disabled={busy} onClick={approveSelected} data-testid="bulk-approve">Duyệt toàn bộ & xuất tệp ({sel.length})</button>
+          <label className="flex items-center gap-1 text-[12px] font-bold"><input type="checkbox" className="h-4 w-4" checked={alsoHand} onChange={(e) => setAlsoHand(e.target.checked)} />giao luôn Claude</label>
           <button className="btn btn-sm" disabled={busy} onClick={handSelected} data-testid="bulk-hand">Giao Claude tạo trên EasyHRM</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setPicked(new Set())}>Bỏ chọn</button>
         </div>

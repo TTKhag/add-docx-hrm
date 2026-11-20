@@ -1,9 +1,11 @@
 import { catalogsRepo, dictionaryRepo, filesRepo, logsRepo, projectsRepo, rowsRepo, sessionsRepo } from '@/db/repositories';
-import type { ContractClass, DocType, LogActor, MappingRow, Session, SessionMode, SessionStatus } from '@/db/types';
+import type { ContractClass, DocType, Handoff, LogActor, MappingRow, Session, SessionMode, SessionStatus } from '@/db/types';
 import { db } from '@/db/schema';
 import { catalogId } from '@/modules/catalog/services/catalog';
 import { ensureCatalog } from '@/modules/catalog/services/catalog.workflow';
+import { createHandoff, supersedeHandoffs } from '@/modules/handoff/services/handoff';
 import { uid } from '@/shared/utils/text';
+import { ensureAssessed } from './assess';
 import { countExistingKeys, detectCandidates } from './detect';
 import { detectDocMeta, detectSigning } from './docMeta';
 import { applyReplacements, DocxError, readDocx, type VerifyIssue, verifyDocx } from './docx';
@@ -117,7 +119,8 @@ async function reopenIfApproved(s: Session) {
     await sessionsRepo.put({ ...s, status: 'cho_duyet', approvedAt: undefined, updatedAt: Date.now() });
     const f = await filesRepo.get(s.id);
     if (f) await filesRepo.put({ sessionId: s.id, original: f.original });
-    await logsRepo.add(s.id, 'nguoi_dung', 'Sửa sau khi duyệt', 'Phiên quay về Chờ duyệt, file xuất cũ bị bỏ');
+    const n = await supersedeHandoffs(s.id); // FR-45: the old package is kept (marked superseded), never deleted
+    await logsRepo.add(s.id, 'nguoi_dung', 'Sửa sau khi duyệt', `Phiên quay về Chờ duyệt, file xuất cũ bị bỏ${n ? ' · gói giao việc cũ đánh dấu đã thay' : ''}`);
   } else if (s.status === 'nhap' || s.status === 'cho_ai') {
     await sessionsRepo.put({ ...s, status: 'cho_duyet', updatedAt: Date.now() });
   } else {
@@ -134,6 +137,7 @@ export async function updateRow(row: MappingRow, patch: Partial<MappingRow>): Pr
   if ('fieldCode' in patch || 'extraLabel' in patch || 'gapGroup' in patch) {
     next.source = 'nguoi_dung';
     next.confidence = undefined;
+    next.assessedBy = undefined; // BR-20: the user decided — no longer highlighted
   }
   if (next.fieldCode && !isExtraField(next.fieldCode)) next.extraLabel = next.gapGroup ? next.extraLabel : undefined;
   await rowsRepo.put(next);
@@ -169,6 +173,8 @@ export interface ApproveResult {
   problems: string[];
   issues: VerifyIssue[];
   keys: string[];
+  handoff?: Handoff;
+  handoffError?: string;
 }
 
 /** "Duyệt phiên": generate keys, write the .docx, verify it. Warnings (personal data left) need explicit acceptance. */
@@ -207,7 +213,15 @@ export async function approveSession(sessionId: string, acceptWarnings = false):
       );
       await logsRepo.add(sessionId, 'nguoi_dung', 'Duyệt phiên', `${v.keys.length} key: ${v.keys.join(', ')}${warnings.length ? ` · chấp nhận ${warnings.length} cảnh báo` : ''}`);
     });
-    return { ok: true, problems: [], issues: v.issues, keys: v.keys };
+    // FR-45: freeze the approved file + EasyHRM job so Claude can always fetch it.
+    try {
+      const handoff = await createHandoff(sessionId);
+      return { ok: true, problems: [], issues: v.issues, keys: v.keys, handoff };
+    } catch (e) {
+      const handoffError = e instanceof Error ? e.message : 'Không lưu được gói giao việc';
+      await logsRepo.add(sessionId, 'he_thong', 'Lỗi gói giao việc', handoffError);
+      return { ok: true, problems: [], issues: v.issues, keys: v.keys, handoffError };
+    }
   } catch (e) {
     if (e instanceof DocxError) return { ok: false, problems: [e.message], issues: [], keys: [] };
     throw e;
@@ -260,7 +274,9 @@ export async function updateSessionMeta(sessionId: string, patch: MetaPatch, act
       const catalog = await ensureCatalog(project?.hrmVersion ?? s.hrmVersion, docType, decisionType ?? '');
       const codes = new Set(catalog.fields.map((f) => f.code));
       const rows = await rowsRepo.bySession(sessionId);
-      await rowsRepo.bulkPut(rows.map((r) => (r.fieldCode && !isExtraField(r.fieldCode) && !codes.has(r.fieldCode) ? { ...r, fieldCode: undefined, format: undefined, key: undefined } : r)));
+      const cleared = rows.map((r) => (r.fieldCode && !isExtraField(r.fieldCode) && !codes.has(r.fieldCode) ? { ...r, fieldCode: undefined, format: undefined, key: undefined } : r));
+      // FR-31: rows that lost their field get a Studio conclusion right away (never an empty "Chọn trường").
+      await rowsRepo.bulkPut(ensureAssessed(cleared, codes).rows);
     }
     await sessionsRepo.put(next);
     const what = [
@@ -280,14 +296,19 @@ export async function updateSessionMeta(sessionId: string, patch: MetaPatch, act
 export interface AcceptAllResult {
   approved: number;
   skipped: number;
-  left: string[]; // candidateIds still waiting (no proposal or T4)
+  left: string[]; // candidateIds still without a conclusion (should be empty since CR-2026-003)
 }
 
-/** FR-09: apply every proposal in one click — rows with a field/extra field → Duyệt, rows proposed as fixed → Bỏ. */
-export async function acceptAllProposals(sessionId: string): Promise<AcceptAllResult> {
+/**
+ * CR-2026-003 FR-38 "Duyệt toàn bộ": every pending row → Duyệt; rows proposed as fixed content → Bỏ.
+ * Rows without a conclusion are assessed first, so nothing is left for the user to pick by hand.
+ */
+export async function approveAll(sessionId: string): Promise<AcceptAllResult> {
   const s = await mustSession(sessionId);
   if (LOCKED.includes(s.status)) throw new WorkflowError('Phiên đã sang EasyHRM.');
-  const rows = await rowsRepo.bySession(sessionId);
+  const catalog = await catalogsRepo.get(catalogId(s.hrmVersion, s.docType, s.decisionType ?? ''));
+  const codes = new Set((catalog?.fields ?? []).map((f) => f.code));
+  const rows = ensureAssessed(await rowsRepo.bySession(sessionId), codes).rows;
   let approved = 0;
   let skipped = 0;
   const left: string[] = [];
@@ -297,8 +318,7 @@ export async function acceptAllProposals(sessionId: string): Promise<AcceptAllRe
       skipped++;
       return { ...r, status: 'bo' as const };
     }
-    const hasField = !!r.fieldCode || !!r.fixedKey || (!!r.gapGroup && r.gapGroup !== 'T4' && !!r.extraLabel?.trim());
-    if (hasField) {
+    if (r.fieldCode || r.fixedKey) {
       approved++;
       return { ...r, status: 'duyet' as const };
     }
@@ -307,10 +327,20 @@ export async function acceptAllProposals(sessionId: string): Promise<AcceptAllRe
   });
   await rowsRepo.bulkPut(next);
   if (approved || skipped) {
-    await logsRepo.add(sessionId, 'nguoi_dung', 'Duyệt toàn bộ đề xuất', `${approved} duyệt, ${skipped} bỏ${left.length ? `, còn ${left.length} dòng chờ` : ''}`);
+    await logsRepo.add(sessionId, 'nguoi_dung', 'Duyệt toàn bộ', `${approved} duyệt, ${skipped} bỏ${left.length ? `, còn ${left.length} dòng chờ` : ''}`);
     await reopenIfApproved(s);
   }
   return { approved, skipped, left };
+}
+
+/** @deprecated kept for older callers — same as approveAll. */
+export const acceptAllProposals = approveAll;
+
+/** FR-39: "Duyệt toàn bộ & xuất tệp" in one call. */
+export async function approveAllAndExport(sessionId: string, acceptWarnings = false): Promise<ApproveResult & { accepted: AcceptAllResult }> {
+  const accepted = await approveAll(sessionId);
+  if (accepted.left.length) return { ok: false, problems: accepted.left.map((c) => `${c}: chưa có kết luận`), issues: [], keys: [], accepted };
+  return { ...(await approveSession(sessionId, acceptWarnings)), accepted };
 }
 
 /** FR-12: put approved sessions into Claude's EasyHRM queue (order = queueOrder). */

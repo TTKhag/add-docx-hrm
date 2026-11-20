@@ -64,6 +64,12 @@ export function suggestByCue(before: string, fields: CatalogField[]): Suggestion
   return undefined;
 }
 
+/** True when the lead-in matches a known HR cue, whether or not the catalog has the field (BR-18). */
+export function cueMatches(before: string): boolean {
+  const tail = normalize(before).slice(-60);
+  return CUE_RULES.some((r) => r.cue.test(tail));
+}
+
 /** For a key already present in the file ({{HoVaTen}}, {{ho_ten}}), find the field with the same TenKey. */
 export function suggestForExistingKey(raw: string, fields: CatalogField[]): Suggestion | undefined {
   const inner = raw.replace(/^\{\{|\}\}$/g, '');

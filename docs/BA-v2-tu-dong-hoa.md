@@ -1,5 +1,7 @@
 # EasyHRM Template Studio v2 — Phân tích nghiệp vụ "tự động hoá tối đa"
 
+> **Đã có thay đổi:** G4, FR-07, FR-09, FR-11, FR-12, BR-03 được thay thế một phần bởi [`cr/CR-2026-003`](cr/CR-2026-003-tu-danh-gia-giao-claude-kho-tep.md).
+
 Người lập: BA (chung) + BA-HRM · Ngày: 19/11/2026 · Căn cứ hành vi EasyHRM: tri-thuc-easyhrm v2.5.39 (trang `hop-dong-loai-hop-dong-mau-nguoi-ky`, `thiet-lap-quyet-dinh`).
 
 Mục tiêu: người dùng **chỉ đọc lại, duyệt (sửa nếu cần) rồi giao cho Claude**. Mọi việc còn lại — phân tích mẫu, đặt tên, chọn loại, sinh key, tạo trường bổ sung, mở EasyHRM, nạp tệp, ghép trường, người ký, vị trí ký, Lưu, kiểm tra, báo cáo — do Studio + Claude làm.

@@ -16,6 +16,15 @@ Người dùng chỉ **đọc lại, duyệt, giao việc**. Bản phân tích n
 3. **Duyệt toàn bộ đề xuất**: một nút cho mỗi phiên, hoặc tick nhiều phiên ở danh sách. Bản xem trước hiển thị **giống Word** (docx-preview).
 4. **Giao Claude tạo trên EasyHRM**: câu lệnh chép sẵn có câu đồng ý Lưu. Claude làm lần lượt từng phiên: mở dự án (dùng phiên đăng nhập đã lưu), tạo mẫu, **tự nạp tệp** (cầu nối `#/cau-noi/:id` hoặc đọc theo đoạn), ghép trường, tạo trường bổ sung, người ký, vị trí ký, Lưu, kiểm tra, báo cáo.
 
+## v2.1 — CR-2026-003 (skill 2.1.0)
+
+Bản phân tích: [`docs/cr/CR-2026-003-tu-danh-gia-giao-claude-kho-tep.md`](docs/cr/CR-2026-003-tu-danh-gia-giao-claude-kho-tep.md).
+
+1. **Không còn "— Chọn trường —"**: key không có trường EasyHRM được Studio/AI tự kết luận là **Trường giá trị bổ sung** (T2) hoặc **Tham số EasyHRM chưa có** (T1 dữ liệu hồ sơ / T3 phải tính), tự đặt tên, tô sọc cam để người dùng để ý. Đúng rồi thì chỉ cần Duyệt.
+2. **Duyệt toàn bộ** trên bảng ghép; **Duyệt toàn bộ & xuất tệp** ở đầu phiên và cho nhiều phiên ở danh sách (tuỳ chọn giao luôn Claude).
+3. **Claude trực**: gửi câu lệnh trực **một lần mỗi ca** (Studio mở Claude với câu lệnh điền sẵn). Sau đó mỗi lần bấm **Giao Claude**, việc vào hàng việc và Claude đang trực tự nhận — không chép, không dán.
+4. **Kho tệp đã duyệt**: Duyệt phiên → lưu **gói giao việc** bất biến (tệp + SHA-256 + `hrm_job`) trong IndexedDB; tuỳ chọn ghi ra **thư mục giao việc** trên máy (Chrome/Edge). Claude lấy tệp từ gói (cầu nối / đọc theo đoạn) hoặc từ thư mục.
+
 ## Chức năng
 
 | Màn | Đường dẫn | Làm gì |
@@ -29,7 +38,7 @@ Người dùng chỉ **đọc lại, duyệt, giao việc**. Bản phân tích n
 | Hồ sơ dự án | `#/du-an` | Link dự án, MST, Tài khoản, phiên bản EasyHRM, người ký hợp đồng mặc định; chọn dự án hiện tại; xuất JSON |
 | Cầu nối tệp | `#/cau-noi/:id` | Trang EasyHRM (Claude điều khiển) mở trang này để nhận tệp đã duyệt qua `postMessage`, chỉ gửi tới đúng domain dự án |
 | Danh mục trường | `#/danh-muc` | Danh mục "Trường lấy giá trị" theo phiên bản × loại mẫu; nhập / đồng bộ JSON, xem khác biệt |
-| Cài vào Claude | `#/claude` | Tải skill `.zip`, hướng dẫn cài, kiểm tra kết nối / phiên bản |
+| Claude trực & cài đặt | `#/claude` | Claude trực (câu lệnh trực, cách mở Claude, hàng việc), thư mục giao việc, tải skill `.zip`, kiểm tra kết nối / phiên bản |
 | Sao lưu | `#/sao-luu` | Xuất / khôi phục toàn bộ dữ liệu, xóa toàn bộ |
 
 ### Quy tắc key `{{TenKey}}`
@@ -50,7 +59,7 @@ Danh mục tạo sẵn là **bản mẫu** (`verified = false`) — nhóm trư�
 
 ## Kết nối với Claude
 
-`window.TemplateStudio` (giao thức `tstudio/1`, skill 2.0.0): `listForAi`, `listQueue`, `getTask`, `getStatus`, `submitProposal`, `startHrm`, `getOutputFile`, `submitHrmReport`, `submitCatalog`, `reportSkillVersion`, `listSessions`. Mọi dữ liệu Claude gửi được kiểm bằng Zod và quy tắc nghiệp vụ; AI không bao giờ tự duyệt. Chi tiết: `skill/easyhrm-template-studio/references/studio-protocol.md`.
+`window.TemplateStudio` (giao thức `tstudio/1`, skill 2.1.0): `startDuty`, `waitForJob`, `completeJob`, `stopDuty`, `getDutyStatus`, `listForAi`, `listQueue`, `getTask`, `getStatus`, `submitProposal`, `startHrm`, `getHandoff`, `getOutputFile`, `submitHrmReport`, `submitCatalog`, `reportSkillVersion`, `listSessions`. Mọi dữ liệu Claude gửi được kiểm bằng Zod và quy tắc nghiệp vụ; AI không bao giờ tự duyệt. Chi tiết: `skill/easyhrm-template-studio/references/studio-protocol.md`.
 
 Bộ skill nằm ở `skill/easyhrm-template-studio/` (SKILL.md + references). `npm run skill` đóng gói thành `public/skill/easyhrm-template-studio-<version>.zip` (thư mục gốc trong zip là tên skill — đúng cấu trúc Claude yêu cầu). Phiên bản và giao thức đặt ở `skill/skill-meta.json`; script kiểm SKILL.md khớp với file này.
 
@@ -59,13 +68,14 @@ Bộ skill nằm ở `skill/easyhrm-template-studio/` (SKILL.md + references). `
 ```
 src/
   app/                 # shell, router (HashRouter), layout sidebar, window.TemplateStudio
-  db/                  # Dexie schema (v2, có migration từ v1), types, repositories
+  db/                  # Dexie schema (v3: + handoffs, jobs; migration từ v1/v2), types, repositories
   modules/
     projects/          # Hồ sơ dự án (validate MST/URL, workflow, trang)
     sessions/          # docx đọc/dò/ghi/kiểm, TenKey, che dữ liệu, gợi ý, bảng ghép, trang phiên
     catalog/           # danh mục trường, nhập/đồng bộ, diff
     agent/             # giao thức Claude ↔ Studio, Khung cho AI
-    skill/             # màn Cài vào Claude
+    skill/             # màn Claude trực & cài đặt
+    handoff/           # gói giao việc (kho tệp đã duyệt) + thư mục giao việc
     backup/            # sao lưu / khôi phục
   shared/              # components (Prinstream), toast, utils
   test/                # setup + tạo .docx giả cho test
@@ -80,7 +90,7 @@ Quy ước: component → hook → service → repository; module dùng nhau qua
 ```bash
 npm ci
 npm run dev          # đóng gói skill rồi chạy Vite
-npm test -- --run    # 66 unit test (docx, TenKey, dò, che toàn văn, tự nhận loại, ghép, giao thức v2, hàng đợi, nạp tệp, luồng end-to-end, sao lưu, popup)
+npm test -- --run    # 77 unit test (docx, TenKey, dò, che toàn văn, tự nhận loại, ghép, tự đánh giá key, giao thức, hàng đợi, gói giao việc, Claude trực, luồng end-to-end, sao lưu, popup)
 npm run typecheck
 npm run build        # dist/ gồm cả dist/skill/*.zip
 npm run preview
@@ -103,3 +113,5 @@ Màn **Sao lưu → Xuất sao lưu** tải một tệp JSON gồm mọi bảng 
 - Đọc `.docx` chạy trên luồng chính (Web Worker không có `DOMParser`); file ≤ 30 trang đọc dưới 1 giây.
 - Dò chỗ cần điền bằng quy tắc: chỗ trống (`……`, `____`, `[…]`), ngày, số tiền, số giấy tờ, số điện thoại, tên người sau "Ông/Bà", key có sẵn. Chỗ quy tắc bỏ sót, Claude chỉ báo (`extra_candidates`) để người dùng xem — chưa có thao tác thêm dòng thủ công.
 - Tải file vào EasyHRM và kéo vị trí ký phụ thuộc khả năng của trình duyệt Claude — skill có phương án để người dùng làm thay bước đó.
+- Trang web không thể tự gửi tin nhắn vào cuộc chat Claude (không API key; liên kết `?q=` của Claude chỉ điền sẵn). Vì vậy mỗi ca làm việc cần **một lần bấm Gửi** câu lệnh trực; sau đó các lần Giao Claude không cần thao tác trong Claude.
+- Chế độ trực và kho gói nằm trong IndexedDB của trình duyệt mở Studio: Studio phải mở trong cùng trình duyệt Claude điều khiển. Khác trình duyệt → Claude dùng thư mục giao việc.

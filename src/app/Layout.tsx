@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
+import { useDuty } from '@/modules/agent';
 import { useCurrentProject } from '@/modules/projects';
 import { Toaster } from '@/shared/components/ui';
 
@@ -12,7 +13,7 @@ const NAV: { group: string; items: { to: string; label: string; testid: string }
     { to: '/du-an', label: 'Hồ sơ dự án', testid: 'nav-projects' },
     { to: '/danh-muc', label: 'Danh mục trường', testid: 'nav-catalog' },
   ] },
-  { group: 'Claude', items: [{ to: '/claude', label: 'Cài vào Claude', testid: 'nav-skill' }] },
+  { group: 'Claude', items: [{ to: '/claude', label: 'Claude trực & cài đặt', testid: 'nav-skill' }] },
   { group: 'Dữ liệu', items: [{ to: '/sao-luu', label: 'Sao lưu', testid: 'nav-backup' }] },
 ];
 
@@ -21,6 +22,7 @@ const initials = (s: string) => s.split(/\s+/).filter(Boolean).slice(-2).map((w)
 export function Layout({ children }: { children: ReactNode }) {
   const loc = useLocation();
   const project = useCurrentProject();
+  const { onDuty, duty } = useDuty();
   const [wipeKey, setWipeKey] = useState(0);
   useEffect(() => setWipeKey((k) => k + 1), [loc.pathname]);
 
@@ -40,6 +42,10 @@ export function Layout({ children }: { children: ReactNode }) {
             <span className="block text-[10px] font-bold uppercase tracking-[.16em] text-white/60">Dự án hiện tại</span>
             <span className="block truncate text-[13px] font-bold">{project ? project.name : 'Chưa chọn'}</span>
           </span>
+        </NavLink>
+        <NavLink to="/claude" className="mx-5 mb-4 flex items-center gap-2 border border-white/20 px-2 py-1.5 text-[11px] font-bold uppercase tracking-[.14em] hover:bg-white/10" data-testid="claude-duty" data-on={onDuty}>
+          <span className="h-2.5 w-2.5 shrink-0" style={{ background: onDuty ? '#3ad16b' : '#ffffff55' }} aria-hidden />
+          {onDuty ? `Claude đang trực${duty ? ` · tới ${new Date(duty.until).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}` : ''}` : 'Claude chưa trực'}
         </NavLink>
         <nav className="flex-1 overflow-y-auto px-5 pb-5" aria-label="Điều hướng chính">
           {NAV.map((g) => (

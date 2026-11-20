@@ -1,6 +1,6 @@
 import { db } from '../schema';
 import type {
-  Catalog, HrmReport, KeyDictionaryEntry, LogActor, LogEntry, MappingRow, Project, Session, SessionFile,
+  AgentJob, Handoff, Catalog, HrmReport, KeyDictionaryEntry, LogActor, LogEntry, MappingRow, Project, Session, SessionFile,
 } from '../types';
 
 // Thin data-access layer. Components never import this directly — they go through module services/hooks.
@@ -11,7 +11,7 @@ export const projectsRepo = {
   put: (p: Project) => db.projects.put(p),
   byName: (name: string) => db.projects.filter((p) => p.name.trim().toLowerCase() === name.trim().toLowerCase()).first(),
   async remove(id: string, withSessions: boolean) {
-    await db.transaction('rw', [db.projects, db.sessions, db.files, db.rows, db.logs, db.hrmReports, db.keyDictionary, db.settings], async () => {
+    await db.transaction('rw', [db.projects, db.sessions, db.files, db.rows, db.logs, db.hrmReports, db.keyDictionary, db.settings, db.handoffs], async () => {
       if (withSessions) {
         const ids = (await db.sessions.where('projectId').equals(id).toArray()).map((s) => s.id);
         for (const sid of ids) await sessionsRepo.removeCascade(sid);
@@ -30,7 +30,8 @@ export const sessionsRepo = {
   put: (s: Session) => db.sessions.put(s),
   countByProject: (projectId: string) => db.sessions.where('projectId').equals(projectId).count(),
   async removeCascade(id: string) {
-    await db.transaction('rw', [db.sessions, db.files, db.rows, db.logs, db.hrmReports], async () => {
+    await db.transaction('rw', [db.sessions, db.files, db.rows, db.logs, db.hrmReports, db.handoffs], async () => {
+      await db.handoffs.where('sessionId').equals(id).delete();
       await db.rows.where('sessionId').equals(id).delete();
       await db.logs.where('sessionId').equals(id).delete();
       await db.hrmReports.where('sessionId').equals(id).delete();
@@ -92,4 +93,24 @@ export const settingsRepo = {
     return (await db.settings.get(key))?.value as T | undefined;
   },
   set: (key: string, value: unknown) => db.settings.put({ key, value }),
+};
+
+export const handoffsRepo = {
+  active: (sessionId: string) => db.handoffs.where('[sessionId+active]').equals([sessionId, 1]).first(),
+  bySession: (sessionId: string) => db.handoffs.where('sessionId').equals(sessionId).sortBy('version'),
+  all: () => db.handoffs.toArray(),
+  put: (h: Handoff) => db.handoffs.put(h),
+  update: (id: string, patch: Partial<Handoff>) => db.handoffs.update(id, patch),
+  async deactivate(sessionId: string) {
+    const act = await db.handoffs.where('[sessionId+active]').equals([sessionId, 1]).toArray();
+    for (const h of act) await db.handoffs.update(h.id, { active: 0 });
+    return act.length;
+  },
+};
+
+export const jobsRepo = {
+  all: () => db.jobs.orderBy('createdAt').toArray(),
+  get: (id: string) => db.jobs.get(id),
+  put: (j: AgentJob) => db.jobs.put(j),
+  byStatus: (status: AgentJob['status']) => db.jobs.where('status').equals(status).sortBy('createdAt'),
 };

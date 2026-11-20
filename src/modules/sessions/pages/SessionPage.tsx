@@ -1,21 +1,23 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { ContractClass, DocType, Session } from '@/db/types';
-import { AgentPanel, promptAnalyze, promptCreate } from '@/modules/agent';
+import { AgentPanel, handOffToClaude, promptAnalyze, useDuty } from '@/modules/agent';
+import { handoffHistory, mirrorAfterApprove } from '@/modules/handoff';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { catalogId, DOC_TYPE_LABEL, useCatalog } from '@/modules/catalog';
 import { DECISION_TYPES } from '@/modules/catalog/services/catalog';
 import { useProjects } from '@/modules/projects';
-import { Confirm, copyText, download, Empty, Field, Modal, PageHeader, Section, Spinner, Stat } from '@/shared/components/ui';
+import { Confirm, download, Empty, Field, Modal, PageHeader, Section, Spinner, Stat } from '@/shared/components/ui';
 import { errorMessage, toast } from '@/shared/components/toast';
 import { formatDateTime } from '@/shared/utils/text';
 import { DocPreview } from '../components/DocPreview';
-import { MappingTable } from '../components/MappingTable';
+import { MappingTable, needsAttention } from '../components/MappingTable';
 import { StatusTag } from '../components/StatusTag';
 import { useLogs, useReports, useRows, useSession, useSessionFile } from '../hooks';
 import type { VerifyIssue } from '../services/docx';
-import { GAP_LABEL, gapReport } from '../services/mapping';
+import { extraFieldRows, GAP_LABEL, gapReport, KIND_LABEL } from '../services/mapping';
 import {
-  acceptAllProposals, approveAllWithField, type ApproveResult, approveSession, deleteSession, handToClaude, handToHrm, markActivated,
+  approveAllAndExport, type ApproveResult, approveSession, deleteSession, handToClaude, handToHrm, markActivated,
   updateSessionMeta, updateTemplateInfo,
 } from '../services/session.workflow';
 
@@ -47,6 +49,8 @@ export default function SessionPage() {
   const [editMeta, setEditMeta] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmActivated, setConfirmActivated] = useState(false);
+  const { onDuty } = useDuty();
+  const packages = useLiveQuery(() => (id ? handoffHistory(id) : []), [id]);
 
   if (session === undefined || rows === undefined) return <Spinner label="Đang tải phiên" />;
   if (session === null) return <Empty>Không tìm thấy phiên. <Link to="/" className="font-bold text-black underline">Về danh sách</Link></Empty>;
@@ -58,35 +62,33 @@ export default function SessionPage() {
   const pending = rows.filter((r) => r.status === 'cho').length;
   const approved = rows.filter((r) => r.status === 'duyet').length;
   const gaps = gapReport(rows);
+  const extras = extraFieldRows(rows);
+  const attention = rows.filter(needsAttention).length;
+  const activePkg = packages?.find((h) => h.active === 1);
 
   const prompt = promptAnalyze([session.id]);
   const canHandHrm = session.status === 'da_duyet' || session.status === 'dung';
 
-  const copyPrompt = async (text: string) => {
-    if (await copyText(text)) toast.ok('Đã chép câu lệnh', 'Dán vào Claude (đã cài skill easyhrm-template-studio).');
-    else toast.warn('Không chép được tự động', text);
-  };
+  /** CR-2026-003 Y3: queue the job; Claude on duty takes it, otherwise Claude opens with the duty prompt prefilled. */
   const giveToClaude = async () => {
     await handToClaude(session.id);
-    await copyPrompt(prompt);
+    await handOffToClaude('phan_tich', [session.id]);
   };
   const giveToHrm = async () => {
     const r = await handToHrm([session.id]);
     if (!r.queued.length) return toast.bad('Chưa giao được', r.refused[0]?.reason);
-    await copyPrompt(promptCreate([session.id], project?.name));
+    await handOffToClaude('tao_hrm', [session.id]);
   };
-  /** FR-09: one click — accept every proposal, then write and verify the file. */
+  /** FR-39: one click — approve every key, write + verify the file, freeze the package (+ handoff folder). */
   const acceptAndApprove = async () => {
     setApproving(true);
     try {
-      const a = await acceptAllProposals(session.id);
-      if (a.left.length) {
-        toast.warn(`Còn ${a.left.length} dòng chưa có đề xuất`, `${a.left.join(', ')} — chọn trường hoặc Bỏ.`);
-        return;
-      }
-      const r = await approveSession(session.id, false);
+      const r = await approveAllAndExport(session.id, false);
       setApproveResult(r);
-      if (r.ok) toast.ok('Đã duyệt phiên', `${a.approved} duyệt, ${a.skipped} bỏ · ${r.keys.length} key. Giao Claude tạo trên EasyHRM.`);
+      if (r.ok) {
+        toast.ok('Đã duyệt phiên', `${r.accepted.approved} duyệt, ${r.accepted.skipped} bỏ · ${r.keys.length} key · đã lưu gói giao việc. Bấm Giao Claude tạo trên EasyHRM.`);
+        await mirrorAfterApprove(r.handoff);
+      }
     } catch (e) {
       toast.bad('Không duyệt được', errorMessage(e));
     } finally {
@@ -100,7 +102,10 @@ export default function SessionPage() {
       const r = await approveSession(session.id, accept);
       setApproveResult(r);
       setAcceptWarn(false);
-      if (r.ok) toast.ok('Đã duyệt phiên', `${r.keys.length} key. Tải .docx hoặc giao Claude tạo mẫu trên EasyHRM.`);
+      if (r.ok) {
+        toast.ok('Đã duyệt phiên', `${r.keys.length} key · đã lưu gói giao việc. Giao Claude tạo mẫu trên EasyHRM.`);
+        await mirrorAfterApprove(r.handoff);
+      }
     } catch (e) {
       toast.bad('Không duyệt được', errorMessage(e));
     } finally {
@@ -115,8 +120,8 @@ export default function SessionPage() {
         sub={<span className="flex flex-wrap items-center gap-2"><StatusTag status={session.status} /> {DOC_TYPE_LABEL[session.docType]}{session.decisionType ? ` · ${session.decisionType}` : ''} · {project?.name ?? '—'} · EasyHRM {session.hrmVersion}</span>}
         actions={<>
           {editable && <button className="btn btn-ghost" onClick={giveToClaude} data-testid="give-to-claude">Giao Claude phân tích</button>}
-          {editable && <button className="btn" onClick={acceptAndApprove} disabled={approving} data-testid="accept-approve">{approving ? 'Đang kiểm tra' : 'Duyệt toàn bộ đề xuất'}</button>}
-          {canHandHrm && <button className="btn" onClick={giveToHrm} data-testid="give-to-hrm">{session.handedToHrmAt ? 'Chép lại câu lệnh tạo' : 'Giao Claude tạo trên EasyHRM'}</button>}
+          {editable && <button className="btn" onClick={acceptAndApprove} disabled={approving} data-testid="accept-approve">{approving ? 'Đang kiểm tra' : 'Duyệt toàn bộ & xuất tệp'}</button>}
+          {canHandHrm && <button className="btn" onClick={giveToHrm} data-testid="give-to-hrm">{session.handedToHrmAt ? 'Giao lại Claude' : 'Giao Claude tạo trên EasyHRM'}</button>}
           {file?.output && <button className="btn" onClick={() => download(file.output!, file.outputName ?? 'mau_TenKey.docx')} data-testid="download-output">Tải .docx</button>}
           {session.status === 'da_tao' && <button className="btn" onClick={() => setConfirmActivated(true)}>Đã bật Hiệu lực</button>}
         </>}
@@ -132,7 +137,8 @@ export default function SessionPage() {
         <Stat label="Chỗ cần điền" value={rows.length} />
         <Stat label="Chờ quyết định" value={pending} accent={pending ? 'warn' : 'ok'} />
         <Stat label="Đã duyệt" value={approved} />
-        <Stat label="Tham số thiếu" value={gaps.length} accent={gaps.length ? 'bad' : undefined} />
+        <Stat label="Cần bạn để ý" value={attention} accent={attention ? 'warn' : 'ok'} />
+        <Stat label="Tham số EasyHRM chưa có" value={gaps.length} accent={gaps.length ? 'bad' : undefined} />
       </div>
 
       <div className="card mb-6">
@@ -143,6 +149,8 @@ export default function SessionPage() {
             {session.docType !== 'quyet_dinh' && <div><div className="label">Phân loại HĐ</div><div>{session.docMeta?.contractClass ? CONTRACT_CLASS[session.docMeta.contractClass] : '—'}{session.docMeta?.termMonths ? ` · ${session.docMeta.termMonths} tháng` : ''}</div></div>}
             {session.docType !== 'quyet_dinh' && <div><div className="label">Người ký công ty</div><div>{session.signing?.companySignerName ?? session.signing?.companyTitle ?? project?.signerDefaults?.companySignerName ?? '—'}{session.signing?.companyAnchor && <div className="text-xs text-mut">Mốc: {session.signing.companyAnchor}</div>}</div></div>}
             <div><div className="label">Chế độ</div><div>{session.mode === 'da_co_key' ? 'Tệp đã có key' : 'Chèn key'}</div></div>
+            <div data-testid="handoff-info"><div className="label">Gói giao việc</div>{activePkg ? <div>Phiên bản {activePkg.version} · {(activePkg.size / 1024).toFixed(0)} KB<div className="text-xs text-mut break-all">{activePkg.mirroredPath ? `Trên máy: ${activePkg.mirroredPath}` : 'Trong trình duyệt (chưa có thư mục giao việc)'}</div></div> : <div className="text-mut">Chưa có — tạo khi Duyệt phiên</div>}</div>
+            <div><div className="label">Claude</div><div>{onDuty ? <span className="tag tag-ok">Đang trực</span> : <span className="tag">Chưa trực</span>}</div></div>
           </div>
           <div className="flex flex-wrap gap-2">
             {session.docMeta && <span className="tag">{META_SOURCE[session.docMeta.source]}</span>}
@@ -165,17 +173,29 @@ export default function SessionPage() {
       {tab === 'bang-ghep' && (
         <>
           <div className="mb-4 flex flex-wrap gap-3">
-            {editable && <button className="btn btn-ghost btn-sm" onClick={async () => toast.info('Đã duyệt', `${await approveAllWithField(session.id)} dòng đã có trường`)} data-testid="approve-all">Duyệt các dòng đã có trường</button>}
             {editable && <button className="btn btn-ghost btn-sm" onClick={() => runApprove(false)} disabled={approving} data-testid="approve-session">Duyệt phiên (theo bảng hiện tại)</button>}
             <button className="btn btn-ghost btn-sm" onClick={() => setShowPreview((v) => !v)} data-testid="toggle-preview">{showPreview ? 'Ẩn xem trước' : 'Hiện xem trước'}</button>
           </div>
           <div className={`grid gap-[22px] ${showPreview ? 'xl:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]' : ''}`}>
             {showPreview && file && <Section title="Xem trước"><DocPreview file={file.original} rows={rows} /></Section>}
             <Section title="Bảng ghép">
-              {rows.length ? <MappingTable rows={rows} fields={fields} locked={locked} /> : <Empty>Không dò thấy chỗ cần điền nào. Kiểm tra văn bản có dấu "……", "____", [ ] hoặc giá trị mẫu.</Empty>}
+              {rows.length ? <MappingTable sessionId={session.id} rows={rows} fields={fields} locked={locked} /> : <Empty>Không dò thấy chỗ cần điền nào. Kiểm tra văn bản có dấu "……", "____", [ ] hoặc giá trị mẫu.</Empty>}
             </Section>
           </div>
-          <Section title="Tham số thiếu">
+          <Section title={`${KIND_LABEL.bo_sung} (${extras.length})`}>
+            {extras.length ? (
+              <div className="overflow-x-auto">
+                <table className="tbl" data-testid="extra-table">
+                  <thead><tr><th>#</th><th>Tên trường</th><th>Key</th><th>Do</th><th>Trạng thái</th></tr></thead>
+                  <tbody>{extras.map((r) => (
+                    <tr key={r.id}><td className="font-bold">{r.candidateId}</td><td>{r.extraLabel}</td><td className="font-mono text-xs">{`{{${r.key ?? r.fixedKey ?? r.fieldCode?.slice(6) ?? ''}}}`}</td><td>{r.assessedBy === 'studio' ? 'Studio đánh giá' : r.assessedBy === 'ai' ? 'AI' : 'Người dùng / quy tắc'}</td><td>{r.status === 'duyet' ? 'Đã duyệt' : 'Chờ'}</td></tr>
+                  ))}</tbody>
+                </table>
+                <p className="mt-2 text-xs text-mut">Claude tạo các trường này ở "Thêm tham số khác → Trường giá trị bổ sung" khi lập mẫu; giá trị được nhập khi lập từng văn bản.</p>
+              </div>
+            ) : <div className="panel"><b>Không có trường giá trị bổ sung.</b></div>}
+          </Section>
+          <Section title={`${KIND_LABEL.chua_co} (${gaps.length})`}>
             {gaps.length ? (
               <div className="overflow-x-auto">
                 <table className="tbl" data-testid="gap-table">
@@ -185,7 +205,7 @@ export default function SessionPage() {
                   ))}</tbody>
                 </table>
               </div>
-            ) : <div className="panel panel-ok"><b>Không có tham số thiếu.</b></div>}
+            ) : <div className="panel panel-ok"><b>Không có tham số EasyHRM chưa có.</b></div>}
           </Section>
         </>
       )}

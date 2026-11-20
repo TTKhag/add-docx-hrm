@@ -1,10 +1,15 @@
-import { catalogsRepo, filesRepo, logsRepo, projectsRepo, reportsRepo, rowsRepo, sessionsRepo, settingsRepo } from '@/db/repositories';
+import { catalogsRepo, filesRepo, logsRepo, projectsRepo, reportsRepo, rowsRepo, sessionsRepo, settingsRepo, jobsRepo } from '@/db/repositories';
 import type { Session } from '@/db/types';
 import { catalogId, DECISION_TYPES } from '@/modules/catalog/services/catalog';
 import { ensureCatalog, previewCatalogImport, saveCatalog } from '@/modules/catalog/services/catalog.workflow';
 import { readDocx } from '@/modules/sessions/services/docx';
 import { STATUS_LABEL } from '@/modules/sessions/services/mapping';
 import { setStatus, updateSessionMeta, WorkflowError } from '@/modules/sessions/services/session.workflow';
+import { ensureAssessed } from '@/modules/sessions/services/assess';
+import { ensureHandoff } from '@/modules/handoff/services/handoff';
+
+import type { AgentJob } from '@/db/types';
+import { completeJob as completeJobSvc, DutyError, getDuty, isOnDuty, startDuty as startDutySvc, stopDuty as stopDutySvc, waitForJob as waitForJobSvc, WAIT_MAX_MS } from './duty';
 import skillMeta from '../../../../skill/skill-meta.json';
 import {
   type AgentTask, applyProposal, buildTask, checkProtocol, type HrmJob, hrmReportSchema, PROTOCOL, type ProtocolError, proposalSchema,
@@ -13,18 +18,11 @@ import {
 
 const AI_STATUSES: Session['status'][] = ['nhap', 'cho_ai', 'cho_duyet'];
 
-async function sha256Hex(buf: ArrayBuffer): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) return '';
-  const h = await subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
+/** File info for hrm_job, from the approved package (CR-2026-003 FR-46). */
 async function outputInfo(sessionId: string): Promise<HrmJob['file'] | undefined> {
-  const f = await filesRepo.get(sessionId);
-  if (!f?.output) return undefined;
-  const buf = await f.output.arrayBuffer();
-  return { name: f.outputName ?? 'mau_TenKey.docx', size: buf.byteLength, sha256: await sha256Hex(buf) };
+  const h = await ensureHandoff(sessionId);
+  if (!h) return undefined;
+  return { name: h.fileName, size: h.size, sha256: h.sha256, version: h.version, mirrored_path: h.mirroredPath };
 }
 
 /** Uniform result for everything exposed to Claude. Plain JSON only. */
@@ -120,7 +118,10 @@ export async function submitProposal(input: unknown): Promise<AgentResult<{ acce
     }
     const r = applyProposal(rows, catalog.fields, p);
     r.rejected.unshift(...addRejected);
-    await rowsRepo.bulkPut(r.rows);
+    // FR-36: rows the AI left without a usable conclusion (T4, gap without label, no proposal) → Studio concludes.
+    const assessed = ensureAssessed(r.rows, new Set(catalog.fields.map((f) => f.code)));
+    if (assessed.changed) metaNotes.push(`Studio tự đánh giá ${assessed.changed} chỗ AI chưa kết luận`);
+    await rowsRepo.bulkPut(assessed.rows);
     if (p.skill_version) await settingsRepo.set('skillVersionReported', p.skill_version);
     await logsRepo.add(s.id, 'ai', 'Gửi đề xuất', `${r.accepted} nhận, ${r.rejected.length} từ chối${metaNotes.length ? ' · ' + metaNotes.join(' · ') : ''}${p.extra_candidates.length ? ` · AI báo thêm ${p.extra_candidates.length} chỗ có thể bị sót` : ''}`);
     for (const extra of p.extra_candidates) await logsRepo.add(s.id, 'ai', 'Chỗ có thể bị sót', extra.hint);
@@ -268,16 +269,91 @@ export async function getOutputFile(sessionId: string, offset = 0, length = CHUN
     const s = await sessionsRepo.get(sessionId);
     if (!s) return fail(`Không có phiên "${sessionId}".`);
     if (!['da_duyet', 'dang_tao', 'dung', 'da_tao'].includes(s.status)) return fail(`Phiên đang "${STATUS_LABEL[s.status]}" — chưa có tệp đã duyệt.`);
-    const f = await filesRepo.get(sessionId);
-    if (!f?.output) return fail('Phiên chưa có tệp xuất — người dùng cần Duyệt phiên.');
-    const all = new Uint8Array(await f.output.arrayBuffer());
+    const h = await ensureHandoff(sessionId);
+    if (!h) return fail('Phiên chưa có gói giao việc — người dùng cần Duyệt phiên.');
+    const all = new Uint8Array(await h.blob.arrayBuffer());
     const len = Math.max(1, Math.min(length, CHUNK_MAX));
     const part = all.subarray(offset, offset + len);
     const done = offset + part.length >= all.length;
     return {
       ok: true,
-      data: { name: f.outputName ?? 'mau_TenKey.docx', size: all.length, sha256: await sha256Hex(all.buffer.slice(all.byteOffset, all.byteOffset + all.byteLength) as ArrayBuffer), offset, length: part.length, base64: toBase64(part), done },
+      data: { name: h.fileName, size: all.length, sha256: h.sha256, offset, length: part.length, base64: toBase64(part), done },
       message: done ? 'Đoạn cuối của tệp.' : `Còn tiếp từ offset ${offset + part.length}.`,
+    };
+  });
+}
+
+// ---------- CR-2026-003: Claude on duty (job queue) + approved-file packages ----------
+
+/** Claude calls this once after the user's duty prompt. `consent_save`: the prompt contains consent to press Lưu. */
+export async function startDuty(opts: { hours?: number; consent_save?: boolean; skill_version?: string } = {}): Promise<AgentResult<{ until: string; waiting: number }>> {
+  return guard(async () => {
+    const d = await startDutySvc({ hours: opts.hours, consentSave: opts.consent_save, skillVersion: opts.skill_version });
+    if (opts.skill_version) await settingsRepo.set('skillVersionReported', opts.skill_version);
+    const waiting = (await jobsRepo.byStatus('cho')).length;
+    return { ok: true, data: { until: new Date(d.until).toISOString(), waiting }, message: `Bắt đầu trực tới ${new Date(d.until).toLocaleTimeString('vi-VN')}. ${waiting} việc đang chờ. Lặp waitForJob(${WAIT_MAX_MS}).` };
+  });
+}
+
+type JobOut = { id: string; kind: AgentJob['kind']; session_ids: string[]; created_at: string };
+const jobOut = (j: AgentJob): JobOut => ({ id: j.id, kind: j.kind, session_ids: j.sessionIds, created_at: new Date(j.createdAt).toISOString() });
+
+/** Wait ≤ 25 s for the next job the user handed over. `data.job` null = nothing yet (call again); `data.stop` = end duty. */
+type WaitData = { job: JobOut | null; stop: boolean; reason?: string };
+export async function waitForJob(timeoutMs = WAIT_MAX_MS): Promise<AgentResult<WaitData>> {
+  return guard<WaitData>(async () => {
+    try {
+      const r = await waitForJobSvc(timeoutMs);
+      if (r.kind === 'job') {
+        return { ok: true, data: { job: jobOut(r.job), stop: false }, message: `Việc ${r.job.id}: ${r.job.kind === 'phan_tich' ? 'phân tích' : 'tạo trên EasyHRM'} ${r.job.sessionIds.length} phiên. Làm xong gọi completeJob("${r.job.id}").` };
+      }
+      if (r.kind === 'stop') return { ok: true, data: { job: null, stop: true, reason: r.reason }, message: `Dừng trực: ${r.reason}` };
+      return { ok: true, data: { job: null, stop: false }, message: 'Chưa có việc — gọi waitForJob lại.' };
+    } catch (e) {
+      if (e instanceof DutyError) return fail(e.message);
+      throw e;
+    }
+  });
+}
+
+export async function completeJob(id: string, note?: string): Promise<AgentResult<{ id: string }>> {
+  return guard(async () => {
+    try {
+      await completeJobSvc(id, note);
+      return { ok: true, data: { id }, message: `Đã hoàn tất việc ${id}. Gọi waitForJob để nhận việc tiếp.` };
+    } catch (e) {
+      if (e instanceof DutyError) return fail(e.message);
+      throw e;
+    }
+  });
+}
+
+export async function stopDuty(): Promise<AgentResult<{ stopped: boolean }>> {
+  return guard(async () => {
+    await stopDutySvc();
+    return { ok: true, data: { stopped: true }, message: 'Đã dừng trực.' };
+  });
+}
+
+export async function getDutyStatus(): Promise<AgentResult<{ on_duty: boolean; until?: string; waiting: number; running: number }>> {
+  return guard(async () => {
+    const d = await getDuty();
+    const [waiting, running] = await Promise.all([jobsRepo.byStatus('cho'), jobsRepo.byStatus('dang_lam')]);
+    return { ok: true, data: { on_duty: isOnDuty(d), until: d ? new Date(d.until).toISOString() : undefined, waiting: waiting.length, running: running.length }, message: isOnDuty(d) ? 'Đang trực.' : 'Chưa trực.' };
+  });
+}
+
+/** FR-46: the approved package of a session (file info, version, path in the handoff folder). */
+export async function getHandoff(sessionId: string): Promise<AgentResult<{ name: string; size: number; sha256: string; version: number; approved_at: string; mirrored_path?: string; hrm_job: unknown }>> {
+  return guard(async () => {
+    const s = await sessionsRepo.get(sessionId);
+    if (!s) return fail(`Không có phiên "${sessionId}" trong trình duyệt này. Nếu người dùng duyệt ở trình duyệt khác, đọc thư mục giao việc (EasyHRM-Studio/hang-doi.json).`);
+    const h = await ensureHandoff(sessionId);
+    if (!h) return fail(`Phiên đang "${STATUS_LABEL[s.status]}" — chưa có gói giao việc.`);
+    return {
+      ok: true,
+      data: { name: h.fileName, size: h.size, sha256: h.sha256, version: h.version, approved_at: new Date(h.approvedAt).toISOString(), mirrored_path: h.mirroredPath, hrm_job: h.job },
+      message: `Gói phiên bản ${h.version}: ${h.fileName} (${(h.size / 1024).toFixed(0)} KB).${h.mirroredPath ? ` Có bản trên máy: ${h.mirroredPath}` : ''}`,
     };
   });
 }
@@ -296,6 +372,12 @@ export interface TemplateStudioApi {
   listQueue: typeof listQueue;
   listForAi: typeof listForAi;
   getOutputFile: typeof getOutputFile;
+  startDuty: typeof startDuty;
+  waitForJob: typeof waitForJob;
+  completeJob: typeof completeJob;
+  stopDuty: typeof stopDuty;
+  getDutyStatus: typeof getDutyStatus;
+  getHandoff: typeof getHandoff;
 }
 
 export function createAgentApi(): TemplateStudioApi {
@@ -303,6 +385,6 @@ export function createAgentApi(): TemplateStudioApi {
     protocol: PROTOCOL,
     skillLatest: skillMeta.version,
     getTask, getStatus, submitProposal, startHrm, submitHrmReport, submitCatalog, reportSkillVersion, listSessions,
-    listQueue, listForAi, getOutputFile,
+    listQueue, listForAi, getOutputFile, startDuty, waitForJob, completeJob, stopDuty, getDutyStatus, getHandoff,
   });
 }

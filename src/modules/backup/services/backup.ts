@@ -20,6 +20,7 @@ function base64ToBlob(s: string, type: string): Blob {
 }
 
 const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const LOCAL_SETTINGS = ['handoffDir', 'claudeDuty'];
 
 export async function exportBackup(): Promise<string> {
   const files = await db.files.toArray();
@@ -35,7 +36,12 @@ export async function exportBackup(): Promise<string> {
       keyDictionary: await db.keyDictionary.toArray(),
       logs: await db.logs.toArray(),
       hrmReports: await db.hrmReports.toArray(),
-      settings: await db.settings.toArray(),
+      // settings that are browser-local (folder handle, Claude duty) are not portable
+      settings: (await db.settings.toArray()).filter((x) => !LOCAL_SETTINGS.includes(x.key)),
+      jobs: await db.jobs.toArray(),
+      handoffs: await Promise.all(
+        (await db.handoffs.toArray()).map(async (h) => ({ ...h, blob: await blobToBase64(h.blob) })),
+      ),
       files: await Promise.all(
         files.map(async (f) => ({
           sessionId: f.sessionId,
@@ -64,6 +70,8 @@ export const backupSchema = z.object({
     logs: anyRows,
     hrmReports: anyRows,
     settings: anyRows,
+    jobs: anyRows.default([]),
+    handoffs: z.array(z.object({ id: z.string(), sessionId: z.string(), blob: z.string() }).loose()).default([]),
     files: z.array(z.object({ sessionId: z.string(), original: z.string(), output: z.string().optional(), outputName: z.string().optional() })),
   }),
 });
@@ -71,7 +79,9 @@ export const backupSchema = z.object({
 export type BackupSummary = { projects: number; sessions: number; catalogs: number };
 
 /** v1 → v2: sessions get mode + queueOrder (same back-fill as the Dexie upgrade). */
-export function migrateBackupTables(schemaVersion: number, t: z.infer<typeof backupSchema>['tables']): z.infer<typeof backupSchema>['tables'] {
+export function migrateBackupTables(schemaVersion: number, input: z.input<typeof backupSchema>['tables']): z.infer<typeof backupSchema>['tables'] {
+  // v2 → v3: no packages / jobs in older backups (packages are re-created on demand by ensureHandoff).
+  const t = { ...input, jobs: input.jobs ?? [], handoffs: input.handoffs ?? [] } as z.infer<typeof backupSchema>['tables'];
   if (schemaVersion >= 2) return t;
   const sessions = [...t.sessions].sort((a, b) => Number(a.createdAt ?? 0) - Number(b.createdAt ?? 0));
   return { ...t, sessions: sessions.map((s, i) => ({ ...s, mode: s.mode ?? 'chen_key', queueOrder: s.queueOrder ?? i + 1 })) };
@@ -95,8 +105,8 @@ export function parseBackup(text: string): { ok: true; data: z.infer<typeof back
 /** Replace all data with the backup (single transaction). */
 export async function restoreBackup(data: z.infer<typeof backupSchema>): Promise<void> {
   const t = data.tables;
-  await db.transaction('rw', [db.projects, db.sessions, db.files, db.rows, db.catalogs, db.keyDictionary, db.logs, db.hrmReports, db.settings], async () => {
-    await Promise.all([db.projects.clear(), db.sessions.clear(), db.files.clear(), db.rows.clear(), db.catalogs.clear(), db.keyDictionary.clear(), db.logs.clear(), db.hrmReports.clear(), db.settings.clear()]);
+  await db.transaction('rw', [db.projects, db.sessions, db.files, db.rows, db.catalogs, db.keyDictionary, db.logs, db.hrmReports, db.settings, db.handoffs, db.jobs], async () => {
+    await Promise.all([db.projects.clear(), db.sessions.clear(), db.files.clear(), db.rows.clear(), db.catalogs.clear(), db.keyDictionary.clear(), db.logs.clear(), db.hrmReports.clear(), db.settings.clear(), db.handoffs.clear(), db.jobs.clear()]);
     /* eslint-disable @typescript-eslint/no-explicit-any */
     await db.projects.bulkPut(t.projects as any);
     await db.sessions.bulkPut(t.sessions as any);
@@ -106,6 +116,8 @@ export async function restoreBackup(data: z.infer<typeof backupSchema>): Promise
     await db.logs.bulkPut(t.logs as any);
     await db.hrmReports.bulkPut(t.hrmReports as any);
     await db.settings.bulkPut(t.settings as any);
+    await db.jobs.bulkPut(t.jobs as any);
+    await db.handoffs.bulkPut(t.handoffs.map((h) => ({ ...h, blob: base64ToBlob(h.blob, DOCX) })) as any);
     await db.files.bulkPut(
       t.files.map((f) => ({
         sessionId: f.sessionId,
@@ -118,7 +130,7 @@ export async function restoreBackup(data: z.infer<typeof backupSchema>): Promise
 }
 
 export async function wipeAll(): Promise<void> {
-  await db.transaction('rw', [db.projects, db.sessions, db.files, db.rows, db.catalogs, db.keyDictionary, db.logs, db.hrmReports, db.settings], async () => {
-    await Promise.all([db.projects.clear(), db.sessions.clear(), db.files.clear(), db.rows.clear(), db.catalogs.clear(), db.keyDictionary.clear(), db.logs.clear(), db.hrmReports.clear(), db.settings.clear()]);
+  await db.transaction('rw', [db.projects, db.sessions, db.files, db.rows, db.catalogs, db.keyDictionary, db.logs, db.hrmReports, db.settings, db.handoffs, db.jobs], async () => {
+    await Promise.all([db.projects.clear(), db.sessions.clear(), db.files.clear(), db.rows.clear(), db.catalogs.clear(), db.keyDictionary.clear(), db.logs.clear(), db.hrmReports.clear(), db.settings.clear(), db.handoffs.clear(), db.jobs.clear()]);
   });
 }

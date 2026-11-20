@@ -1,4 +1,5 @@
-import { filesRepo, projectsRepo, sessionsRepo } from '@/db/repositories';
+import { projectsRepo, sessionsRepo } from '@/db/repositories';
+import { ensureHandoff } from '@/modules/handoff/services/handoff';
 
 /**
  * File hand-off to an EasyHRM tab (FR-11, path A). The EasyHRM page (driven by Claude) opens
@@ -23,13 +24,13 @@ export async function prepareBridge(sessionId: string): Promise<{ ok: true; msg:
   if (!['da_duyet', 'dang_tao', 'dung'].includes(s.status)) return { ok: false, message: 'Phiên chưa được duyệt — không gửi tệp.' };
   const project = await projectsRepo.get(s.projectId);
   if (!project) return { ok: false, message: 'Phiên không gắn dự án.' };
-  const f = await filesRepo.get(sessionId);
-  if (!f?.output) return { ok: false, message: 'Chưa có tệp đã duyệt.' };
-  const buffer = await f.output.arrayBuffer();
+  const h = await ensureHandoff(sessionId);
+  if (!h) return { ok: false, message: 'Chưa có gói giao việc (tệp đã duyệt).' };
+  const buffer = await h.blob.arrayBuffer();
   return {
     ok: true,
     origin: new URL(project.url).origin,
-    msg: { type: BRIDGE_MESSAGE, sessionId, name: f.outputName ?? 'mau_TenKey.docx', size: buffer.byteLength, buffer },
+    msg: { type: BRIDGE_MESSAGE, sessionId, name: h.fileName, size: buffer.byteLength, buffer },
   };
 }
 

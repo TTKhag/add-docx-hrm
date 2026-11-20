@@ -127,6 +127,7 @@ export interface MappingRow {
   fixedKey?: string;     // v2: key already in the file (mode da_co_key) — kept as is
   proposedSkip?: boolean; // v2: AI suggests "Bỏ" (fixed content); applied by "Duyệt toàn bộ đề xuất"
   addedBy?: 'ai';        // v2: candidate added by the AI from the full text
+  assessedBy?: 'studio' | 'ai'; // v3: conclusion set automatically (highlighted until the user decides)
 }
 
 export type FieldKind = 'text' | 'date' | 'number';
@@ -186,6 +187,49 @@ export interface HrmReport {
   unmappedKeys: string[];
   hrmMessages: string[];
   skillVersion?: string;
+}
+
+/** CR-2026-003 FR-45: immutable package created each time a session is approved (file + EasyHRM job). */
+export interface Handoff {
+  id: string;             // `${sessionId}#${version}`
+  sessionId: string;
+  projectId: string;
+  version: number;
+  active: 0 | 1;          // 1 = current package; 0 = superseded (session reopened / re-approved)
+  fileName: string;
+  blob: Blob;
+  size: number;
+  sha256: string;
+  job: unknown;           // HrmJob snapshot at approval time (agent/protocol)
+  approvedAt: number;
+  mirroredPath?: string;  // path inside the "Thư mục giao việc" (FR-47)
+  mirroredAt?: number;
+}
+
+export type JobKind = 'phan_tich' | 'tao_hrm';
+export type JobStatus = 'cho' | 'dang_lam' | 'xong' | 'huy';
+
+/** CR-2026-003 FR-41: work the user hands to Claude from Studio. Carries no instruction — only kind + session ids (BR-21). */
+export interface AgentJob {
+  id: string;
+  kind: JobKind;
+  sessionIds: string[];
+  status: JobStatus;
+  createdAt: number;
+  takenAt?: number;
+  doneAt?: number;
+  note?: string;
+}
+
+/** Claude "on duty" state (settings key `claudeDuty`). */
+export interface DutyState {
+  startedAt: number;
+  until: number;
+  heartbeatAt: number;
+  skillVersion?: string;
+  consentSave: boolean;   // the duty prompt the user sent includes consent to press Lưu
+  stoppedAt?: number;
+  lastJobAt?: number;
 }
 
 export interface Setting {

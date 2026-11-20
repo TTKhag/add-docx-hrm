@@ -9,6 +9,7 @@ import { NewSessionPage, SessionPage, SessionsPage } from '@/modules/sessions';
 import { SkillPage } from '@/modules/skill';
 import { ErrorBoundary, Spinner } from '@/shared/components/ui';
 import { installAgentBridge } from './agentBridge';
+import { backfillV3 } from './backfillV3';
 import { Layout } from './Layout';
 
 const guard = (name: string, el: React.ReactNode) => <ErrorBoundary name={name}>{el}</ErrorBoundary>;
@@ -17,6 +18,7 @@ export default function App() {
   useEffect(() => {
     installAgentBridge();
     void requestPersistentStorage();
+    void backfillV3().catch(() => undefined);
   }, []);
   return (
     <HashRouter>

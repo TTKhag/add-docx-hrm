@@ -22,7 +22,9 @@ describe('buildRows', () => {
     expect(rows[0].fieldCode).toBe('nv.ho_va_ten');
     expect(rows[1].fieldCode).toBe('nv.ngay_sinh');
     expect(rows[1].format).toBe('dd/MM/yyyy');
-    expect(rows[2].fieldCode).toBeUndefined();
+    // CR-2026-003: no field → Studio concludes instead of leaving "— Chọn trường —"
+    expect(rows[2].fieldCode).toBe('extra:KhongRo');
+    expect(rows[2].assessedBy).toBe('studio');
     expect(rows.every((r) => r.status === 'cho')).toBe(true);
   });
   it('maps an existing key to the field with the same TenKey', () => {

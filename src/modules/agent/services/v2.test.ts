@@ -62,7 +62,7 @@ describe('v2: batch → AI full-text proposal → one-click approve → queue �
     const nameRow = rows0.find((r) => r.ruleHint === 'person_name')!; // "đối với ông Nguyễn Văn Mẫu" (lowercase cue)
     expect(nameRow.text).toBe('Nguyễn Văn Mẫu');
     const prop = await submitProposal({
-      protocol: PROTOCOL, session_id: qd.id, skill_version: '2.0.0',
+      protocol: PROTOCOL, session_id: qd.id, skill_version: '2.1.0',
       doc_meta: { template_name: 'Quyết định bổ nhiệm lại RHM' },
       proposals: [
         { candidate_id: dateRow.candidateId, field_code: 'qd.ngay_quyet_dinh', confidence: 'cao' },

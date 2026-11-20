@@ -1,10 +1,10 @@
 import Dexie, { type Table } from 'dexie';
 import type {
-  Catalog, HrmReport, KeyDictionaryEntry, LogEntry, MappingRow, Project, Session, SessionFile, Setting,
+  AgentJob, Catalog, Handoff, HrmReport, KeyDictionaryEntry, LogEntry, MappingRow, Project, Session, SessionFile, Setting,
 } from './types';
 
 export const DB_NAME = 'add-docx-hrm';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 export class StudioDB extends Dexie {
   projects!: Table<Project, string>;
@@ -16,6 +16,8 @@ export class StudioDB extends Dexie {
   logs!: Table<LogEntry, number>;
   hrmReports!: Table<HrmReport, number>;
   settings!: Table<Setting, string>;
+  handoffs!: Table<Handoff, string>;
+  jobs!: Table<AgentJob, string>;
 
   constructor(name = DB_NAME) {
     super(name);
@@ -43,6 +45,12 @@ export class StudioDB extends Dexie {
           await tx.table('sessions').update(s.id, { mode: s.mode ?? 'chen_key', queueOrder: s.queueOrder ?? n });
         }
       });
+    // v3 (CR-2026-003): approved-file packages + Claude job queue. Row assessment and packages for already
+    // approved sessions are back-filled by `upgradeV3` (needs catalogs, sha256 → done after open, see db/upgrade.ts).
+    this.version(3).stores({
+      handoffs: 'id, sessionId, [sessionId+active], approvedAt',
+      jobs: 'id, status, createdAt',
+    });
   }
 }
 

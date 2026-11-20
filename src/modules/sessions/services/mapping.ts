@@ -1,6 +1,7 @@
 import type { CatalogField, GapGroup, MappingRow, SessionStatus } from '@/db/types';
 import type { Candidate } from './detect';
-import { suggestByCue, suggestForExistingKey } from './suggest';
+import { assessRow, EXTRA_PREFIX, rowKind } from './assess';
+import { cueMatches, suggestByCue, suggestForExistingKey } from './suggest';
 import { isValidTenKey, normalizeExistingKey, toTenKey, uniqueKey } from './tenKey';
 import { normalize } from '@/shared/utils/text';
 
@@ -17,7 +18,7 @@ export function suggestSkip(paragraph: string, hint: string): string | undefined
   return 'Quy tắc: căn cứ pháp lý cố định — đề xuất Bỏ';
 }
 
-export const EXTRA_PREFIX = 'extra:';
+export { EXTRA_PREFIX };
 
 export function isExtraField(code?: string): boolean {
   return !!code && code.startsWith(EXTRA_PREFIX);
@@ -62,6 +63,8 @@ export function buildRows(
     }
     const f = fields.find((x) => x.code === row.fieldCode);
     if (f) row.format = defaultFormat(f);
+    // CR-2026-003 FR-31: no field found → Studio concludes (bổ sung / chưa có) instead of leaving the row empty.
+    else Object.assign(row, assessRow(row, before, { cueKnown: cueMatches(before) }));
     return row;
   });
 }
@@ -142,10 +145,9 @@ export function readiness(rows: MappingRow[], fields: CatalogField[]): Readiness
   for (const r of rows) {
     if (r.status === 'cho') problems.push({ candidateId: r.candidateId, message: `${r.candidateId}: chưa duyệt hoặc bỏ.` });
     if (r.status === 'duyet') {
-      const hasField = !!r.fieldCode && (isExtraField(r.fieldCode) || fields.some((f) => f.code === r.fieldCode));
-      const isGap = !!r.gapGroup && r.gapGroup !== 'T4' && !!r.extraLabel?.trim();
-      if (r.gapGroup === 'T4') problems.push({ candidateId: r.candidateId, message: `${r.candidateId}: nhóm T4 (không chắc là tham số) — chọn Duyệt kèm trường hoặc Bỏ.` });
-      else if (!hasField && !isGap) problems.push({ candidateId: r.candidateId, message: `${r.candidateId}: chưa chọn trường hoặc tên tham số thiếu.` });
+      const kind = rowKind(r);
+      const ok = kind === 'bo_sung' || kind === 'chua_co' || (kind === 'truong' && fields.some((f) => f.code === r.fieldCode)) || (!!r.fixedKey && kind !== 'none');
+      if (!ok) problems.push({ candidateId: r.candidateId, message: `${r.candidateId}: chưa có kết luận (trường / trường bổ sung / tham số chưa có) hoặc tên tham số trống.` });
     }
   }
   return problems;
@@ -167,6 +169,8 @@ export const GAP_LABEL: Record<GapGroup, string> = {
   T4: 'T4 · Không chắc là tham số',
 };
 
+export const KIND_LABEL = { bo_sung: 'Trường giá trị bổ sung', chua_co: 'Tham số EasyHRM chưa có' } as const;
+
 const GAP_SUGGESTION: Record<GapGroup, string> = {
   T1: 'Claude tạo "Trường giá trị bổ sung" (nhập khi lập văn bản); nên đề nghị đội sản phẩm bổ sung trường.',
   T2: 'Claude tạo "Trường giá trị bổ sung" trên EasyHRM và ghép.',
@@ -174,9 +178,10 @@ const GAP_SUGGESTION: Record<GapGroup, string> = {
   T4: 'Giữ nguyên văn bản, hỏi người dùng.',
 };
 
+/** FR-37: "Tham số thiếu" = T1/T3 only (to report to the EasyHRM product team). */
 export function gapReport(rows: MappingRow[]): GapLine[] {
   return rows
-    .filter((r) => r.gapGroup && r.status !== 'bo')
+    .filter((r) => rowKind(r) === 'chua_co' && r.status !== 'bo')
     .map((r) => ({
       candidateId: r.candidateId,
       group: r.gapGroup!,
@@ -185,6 +190,11 @@ export function gapReport(rows: MappingRow[]): GapLine[] {
       note: r.gapNote,
       suggestion: GAP_SUGGESTION[r.gapGroup!],
     }));
+}
+
+/** Rows concluded as "Trường giá trị bổ sung" (T2). */
+export function extraFieldRows(rows: MappingRow[]): MappingRow[] {
+  return rows.filter((r) => rowKind(r) === 'bo_sung' && r.status !== 'bo');
 }
 
 /** Keys that EasyHRM cannot fill (gap rows): printing would leave {{...}} visible. */

@@ -35,7 +35,7 @@ export interface HrmJob {
   contract?: { phan_loai?: string; thoi_han_thang?: number };
   signing?: { company_title?: string; company_signer_name?: string; employee_anchor?: string; company_anchor?: string };
   signer_defaults?: Project['signerDefaults'];
-  file?: { name: string; size: number; sha256: string };
+  file?: { name: string; size: number; sha256: string; version?: number; mirrored_path?: string };
   handed_to_claude: boolean;
   queue_order?: number;
   /** When a field_label is missing on EasyHRM: create a "Trường giá trị bổ sung" with this key/label and map it (FR-04). */
@@ -354,6 +354,7 @@ export function applyProposal(rows: MappingRow[], fields: CatalogField[], p: Pro
       gapNote: undefined,
       extraLabel: undefined,
       proposedSkip: undefined,
+      assessedBy: undefined,
     } satisfies Partial<MappingRow>);
     accepted++;
   });
@@ -370,6 +371,7 @@ export function applyProposal(rows: MappingRow[], fields: CatalogField[], p: Pro
       extraLabel: g.label,
       gapNote: g.note,
       source: 'ai',
+      assessedBy: extra.fieldCode ? 'ai' : undefined,
       confidence: extra.fieldCode ? 'trung_binh' : 'thap',
       reason: extra.fieldCode
         ? `AI: trường giá trị bổ sung "${g.label}" (${g.group})${g.note ? ' — ' + g.note : ''}`
@@ -390,6 +392,7 @@ export function applyProposal(rows: MappingRow[], fields: CatalogField[], p: Pro
       fieldCode: row.fixedKey ? row.fieldCode : undefined,
       source: 'ai',
       confidence: undefined,
+      assessedBy: undefined,
       reason: `AI đề xuất Bỏ${k.reason ? ': ' + k.reason : ''}`,
     } satisfies Partial<MappingRow>);
     accepted++;

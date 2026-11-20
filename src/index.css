@@ -116,6 +116,10 @@
   .hl { background: #000; color: #fff; padding: 0 2px; }
   .hl-pending { background: #fff; color: #000; box-shadow: inset 0 -3px 0 #000; }
   .hl-skip { color: #6b6b6b; text-decoration: line-through; }
+  /* CR-2026-003 FR-34: rows concluded automatically (no catalog field) — must catch the user's eye */
+  tr.row-assess > td { background: repeating-linear-gradient(115deg, #fff7e8 0 10px, #fff 10px 14px); }
+  tr.row-assess > td:first-child { box-shadow: inset 5px 0 0 #c77700; }
+  .tag-assess { border-color: #c77700; background: #c77700; color: #fff; }
 
   .rise { animation: rise .32s var(--ease) both; }
   .wipe { position: fixed; top: 0; left: 0; height: 3px; width: 100%; background: #000; transform: skewX(-28deg); animation: wipe .45s var(--ease) both; z-index: 60; pointer-events: none; }
